@@ -1,0 +1,46 @@
+{
+  "name": "@earendil-works/pi-durable-subagents",
+  "version": "0.1.0",
+  "description": "Persistent named background agents for Pi",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "src",
+    "README.md",
+    "GLOSSARY.md"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "subagents",
+    "durable"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "test:copilot": "node --experimental-strip-types test/copilot-smoke.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "^1.5.2",
+    "@earendil-works/pi-coding-agent": "^1.5.2",
+    "@earendil-works/pi-durable": "^1.5.2"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@types/node": "^22.19.19",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.12"
+  },
+  "dependencies": {
+    "typebox": "^1.4.7",
+    "yaml": "^2.9.1"
+  }
+}
