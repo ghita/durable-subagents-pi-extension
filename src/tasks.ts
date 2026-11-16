@@ -57,7 +57,12 @@ export const AgentReporter = defineTask<ReporterInput, ReporterState, null>({
 				// Stop removes the current request without creating an outgoing report.
 				if (settled.reason !== "aborted") reportText = `The request ended without an answer (${settled.reason}).`;
 			} else if (settled.type === "input") {
-				const answerEntry = await runtime.entry(AssistantEntry, settled.answer, context);
+				// This reporter runs in the root conversation, while the answer belongs to the child.
+				// Read the child's context at the settled answer so later turns or compaction cannot change the lookup.
+				const answerContext = await runtime.context(conversationId, context, { at: settled.answer });
+				const answerEntry = answerContext.entries.find((entry) =>
+					entry.id === settled.answer && AssistantEntry.is(entry),
+				);
 				const answer = answerEntry?.model?.[0] as AssistantMessage | undefined;
 				reportText = assistantText(answer) || "The agent finished without a text response.";
 			}

@@ -1,7 +1,7 @@
 {
-  "name": "@earendil-works/pi-durable-subagents",
+  "name": "pi-durable-subagents-extension",
   "version": "0.1.0",
-  "description": "Persistent named background agents for Pi",
+  "description": "Persistent background agents for Pi",
   "type": "module",
   "license": "MIT",
   "files": [

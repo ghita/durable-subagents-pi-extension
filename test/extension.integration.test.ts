@@ -122,6 +122,7 @@ describe("Pi extension integration", () => {
 		expect(messages[0]?.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
 		expect(messages[0]?.message).toMatchObject({
 			customType: "durable-subagent-report",
+			content: expect.stringContaining("The delegated answer."),
 			details: { agentName: "analyst" },
 		});
 
@@ -142,6 +143,9 @@ describe("Pi extension integration", () => {
 		const followUpDeadline = Date.now() + 5_000;
 		while (messages.length < 2 && Date.now() < followUpDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(messages).toHaveLength(2);
+		expect(messages[1]?.message).toMatchObject({
+			content: expect.stringContaining("Follow-up on the updated model."),
+		});
 		expect(streamSimple.mock.calls.some(([usedModel]) => usedModel.id === "faux-next")).toBe(true);
 
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, context);
