@@ -128,8 +128,10 @@ describe("Pi extension integration", () => {
 
 		await commands.get("agents")!.handler("list", commandContext);
 		expect(notifications.join("\n")).toContain("analyst");
+		await commands.get("agents")!.handler("status analyst", commandContext);
+		expect(notifications.at(-1)).toContain("analyst — idle; unconfigured;");
 		expect(await commands.get("agents")!.getArgumentCompletions("status ")).toEqual([
-			{ value: "analyst", label: "analyst" },
+			{ value: "status analyst", label: "analyst" },
 		]);
 
 		const nextModel = providerModels.getModel(model.provider, "faux-next")!;
