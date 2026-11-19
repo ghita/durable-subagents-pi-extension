@@ -55,6 +55,9 @@ describe("durable subagent domain helpers", () => {
 			message: "Keep all prior context.",
 		});
 		expect(parseAgentsCommand("stop --all")).toEqual({ action: "stop-all" });
+		expect(parseAgentsCommand("footer alwaysOn")).toEqual({ action: "footer", alwaysOn: true });
+		expect(parseAgentsCommand("footer activity")).toEqual({ action: "footer", alwaysOn: false });
+		expect(() => parseAgentsCommand("footer on")).toThrow(/alwaysOn\|activity/);
 		expect(() => parseAgentsCommand("spawn worker run task")).toThrow(/-- <task>/);
 	});
 

@@ -12,6 +12,10 @@ export interface ManagedAgentRecord extends JsonObject {
 	inheritThinking: boolean;
 	incomingCount: number;
 	outgoingCount: number;
+	/** Latest request text shown in the running-agent footer. */
+	latestTask: string;
+	/** True until a later message is sent to this agent after its initial spawn. */
+	fresh: boolean;
 	reporterTaskIds: TaskId[];
 }
 

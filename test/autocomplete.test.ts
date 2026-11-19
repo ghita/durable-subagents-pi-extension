@@ -12,6 +12,8 @@ describe("/agents completions", () => {
 		expect(getAgentCompletions("spawn ", presets, agents)?.map((item) => item.value)).toEqual(["spawn researcher", "spawn writer"]);
 		expect(getAgentCompletions("spawn --preset ", presets, agents)?.map((item) => item.value)).toEqual(["spawn --preset researcher", "spawn --preset writer"]);
 		expect(getAgentCompletions("status ", presets, agents)?.map((item) => item.value)).toEqual(["status scout", "status researcher", 'status "file reviewer"']);
+		expect(getAgentCompletions("footer ", presets, agents)?.map((item) => item.value)).toEqual(["footer alwaysOn", "footer activity"]);
+		expect(getAgentCompletions("footer al", presets, agents)).toEqual([{ value: "footer alwaysOn", label: "alwaysOn" }]);
 		expect(getAgentCompletions("stop --all", presets, agents)).toBeNull();
 	});
 

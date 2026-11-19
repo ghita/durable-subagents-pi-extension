@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { AgentService } from "./agent-service.ts";
+import { AgentFooterController } from "./footer.ts";
 import { getAgentCompletions } from "./autocomplete.ts";
 import { parseAgentsCommand } from "./command-parser.ts";
 import { formatAgentList, formatAgentSummary, formatHelp, formatPresets, formatStats } from "./format.ts";
@@ -30,16 +31,46 @@ const SubagentParameters = Type.Object({
 });
 
 let activeRuntime: ManagedSessionRuntime | undefined;
+let activeFooter: { runtime: ManagedSessionRuntime; controller: AgentFooterController } | undefined;
+let footerAlwaysOn = false;
 let opening: { sessionFile: string; promise: Promise<ManagedSessionRuntime> } | undefined;
 let propagation = Promise.resolve();
 
+function stopFooter(): void {
+	activeFooter?.controller.dispose();
+	activeFooter = undefined;
+}
+
+function ensureFooter(context: ExtensionContext, runtime: ManagedSessionRuntime): void {
+	if (context.mode !== "tui") {
+		if (activeFooter?.runtime === runtime) stopFooter();
+		return;
+	}
+	if (activeFooter?.runtime === runtime) {
+		activeFooter.controller.wake();
+		return;
+	}
+	stopFooter();
+	const controller = new AgentFooterController(context, runtime.service, footerAlwaysOn);
+	activeFooter = { runtime, controller };
+	controller.wake();
+}
+
 async function getRuntime(pi: ExtensionAPI, context: ExtensionContext): Promise<ManagedSessionRuntime> {
 	const sessionFile = requireSessionFile(context.sessionManager.getSessionFile());
-	if (activeRuntime?.sessionFile === sessionFile) return activeRuntime;
-	if (opening?.sessionFile === sessionFile) return opening.promise;
+	if (activeRuntime?.sessionFile === sessionFile) {
+		ensureFooter(context, activeRuntime);
+		return activeRuntime;
+	}
+	if (opening?.sessionFile === sessionFile) {
+		const runtime = await opening.promise;
+		ensureFooter(context, runtime);
+		return runtime;
+	}
 	if (activeRuntime !== undefined) {
 		const previous = activeRuntime;
 		activeRuntime = undefined;
+		stopFooter();
 		await previous.close();
 	}
 
@@ -48,6 +79,7 @@ async function getRuntime(pi: ExtensionAPI, context: ExtensionContext): Promise<
 	try {
 		const runtime = await promise;
 		activeRuntime = runtime;
+		ensureFooter(context, runtime);
 		return runtime;
 	} finally {
 		if (opening?.promise === promise) opening = undefined;
@@ -59,6 +91,8 @@ async function notifyCommand(context: ExtensionContext, action: () => Promise<st
 		context.ui.notify(await action(), "info");
 	} catch (error) {
 		context.ui.notify(error instanceof Error ? error.message : String(error), "error");
+	} finally {
+		activeFooter?.controller.wake();
 	}
 }
 
@@ -132,6 +166,14 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 				const command = parseAgentsCommand(args);
 				if (command.action === "help") return formatHelp(presetCatalog);
 				if (command.action === "presets") return formatPresets(presetCatalog);
+				if (command.action === "footer") {
+					footerAlwaysOn = command.alwaysOn;
+					activeFooter?.controller.setAlwaysOn(footerAlwaysOn);
+					if (context.mode === "tui") await getRuntime(pi, context);
+					return footerAlwaysOn
+						? "Agent footer is always on, including when no agents are running."
+						: "Agent footer now appears only during activity (and for the three-second hide delay).";
+				}
 				const runtime = await getRuntime(pi, context);
 				if (command.action === "list") return formatAgentList(await runtime.service.list());
 				if (command.action === "status") return formatAgentSummary(await runtime.service.status(command.name));
@@ -161,8 +203,8 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 	});
 
 	pi.registerTool({
-		name: "subagent",
-		label: "Subagent",
+		name: "durable_subagent",
+		label: "Durable Subagent",
 		promptSnippet: "Spawn, steer, inspect, and stop persistent named background agents.",
 		description:
 			"Manage persistent named background agents. Actions: spawn (choose a meaningful name, optional presetId, and task), send (name and message; steers busy work), list, status (optionally name), stop (name), stop-all, stats. " +
@@ -183,6 +225,8 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 					details: {},
 					isError: true,
 				};
+			} finally {
+				activeFooter?.controller.wake();
 			}
 		},
 	});
@@ -199,6 +243,7 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 	pi.on("session_shutdown", async (_event, context) => {
 		const previous = activeRuntime;
 		activeRuntime = undefined;
+		stopFooter();
 		if (previous !== undefined) {
 			try {
 				await previous.close();

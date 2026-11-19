@@ -1,4 +1,4 @@
-const ACTIONS = ["help", "presets", "list", "status", "spawn", "send", "stop", "stats"] as const;
+const ACTIONS = ["help", "presets", "list", "status", "spawn", "send", "stop", "stats", "footer"] as const;
 
 function items(values: readonly string[], partial: string, before: string) {
 	const needle = partial.replace(/^['"]/, "").replace(/['"]$/, "").toLocaleLowerCase();
@@ -32,6 +32,13 @@ export function getAgentCompletions(prefix: string, presetIds: readonly string[]
 		if (current.startsWith("--")) return complete(["--preset"]);
 		if (prior.includes("--preset")) return null;
 		return complete(presetIds);
+	}
+
+	if (action === "footer") {
+		if ((trailingSpace && tokens.length === 1) || (!trailingSpace && tokens.length === 2)) {
+			return complete(["alwaysOn", "activity"]);
+		}
+		return null;
 	}
 
 	if (action === "status" || action === "send" || action === "stop") {

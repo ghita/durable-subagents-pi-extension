@@ -28,6 +28,7 @@ Run checks with `npm test` and `npm run typecheck`. `npm run test:copilot` makes
 /agents stop <name>
 /agents stop --all
 /agents stats
+/agents footer alwaysOn|activity
 ```
 
 Names containing spaces can be quoted. If a spawn name matches a preset ID, that preset is used by default; `--preset` can select a different preset while retaining the chosen instance name. A missing preset is an unconfigured, all-tools agent. Name collisions—including with idle agents—receive a numeric suffix. Agents remain registered after completing or stopping work, and later `send` operations reuse their conversation. A send to busy work is steered into the existing agent. `stop --all` affects managed work only, never the main Pi agent.
@@ -65,6 +66,14 @@ Each managed agent is stored in a SQLite sidecar beside its Pi transcript, named
 Reports are extension-authored custom follow-up messages, not user commands. They include a stable report ID; the extension checks Pi's session entries before retrying and acknowledges a report only after the entry is visible there. Pi's transcript and the Durable sidecar cannot be committed atomically, so a crash or storage divergence at that boundary can still produce at-least-once delivery. Message counters are stored with the managed-agent registry and updated idempotently around stable report/request IDs.
 
 Status and stats read Durable usage records for managed child conversations only. The main Pi conversation is excluded. Usage cost uses the best available provider-reported or model-catalog value, so aggregate costs may mix those sources.
+
+## Running-agent footer
+
+By default, in Pi's interactive TUI, the footer temporarily shows a moving spinner and a stacked status block for every running managed agent. Each block includes the agent name, its short model ID and thinking level, cumulative assistant turns and executed tool uses, cumulative message in/out counts and cost, an estimated context-token count, and a one-line preview of its latest request. `[fresh]` appears only for an agent's first task. Idle and completed agents are omitted, and the built-in footer returns when no managed agent is running.
+
+Use `/agents footer alwaysOn` to keep the custom footer visible and show managed-agent summaries even after they become idle. `/agents footer activity` restores the default behavior, showing only active agents and keeping the footer for the three-second hide delay. This setting lasts for the current Pi extension process.
+
+The display refreshes about once a second while agents are running. Context usage is a proxy from the latest model-reported input usage and may lag until the agent's next model response. On short terminals, task previews are hidden before agent status lines. The extension recreates the normal cwd, usage, model, and extension-status footer lines while its custom multi-line footer is active.
 
 ## Safety and scope
 

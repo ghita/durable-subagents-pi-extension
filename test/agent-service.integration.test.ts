@@ -1,10 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
 	AgentDoc,
 	createRegistry,
@@ -84,7 +84,7 @@ async function setup(
 
 describe("AgentService durable lifecycle", () => {
 	it("spawns, reuses, counts, reports, and retains a named child conversation", async () => {
-		const { service, harness } = await setup(["first answer", "second answer"]);
+		const { service, harness, root } = await setup(["first answer", "second answer"]);
 
 		const spawned = await service.spawn("researcher", undefined, "Find one useful fact.");
 		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
@@ -92,6 +92,8 @@ describe("AgentService durable lifecycle", () => {
 		expect(first.active).toBe(false);
 		expect(first.incomingCount).toBe(1);
 		expect(first.outgoingCount).toBe(0);
+		await expect(harness.snapshot(SubagentsDoc, root.id, BACKGROUND_CONTEXT))
+			.resolves.toMatchObject({ agents: { researcher: { latestTask: "Find one useful fact.", fresh: true } } });
 
 		const sent = await service.send("researcher", "Add one more detail.");
 		await harness.waitForTask(sent.reporterTaskId, BACKGROUND_CONTEXT);
@@ -104,12 +106,57 @@ describe("AgentService durable lifecycle", () => {
 		expect(reused.conversationId).toBe(spawned.conversationId);
 		expect(reused.incomingCount).toBe(2);
 		expect(reused.outgoingCount).toBe(2);
+		await expect(harness.snapshot(SubagentsDoc, root.id, BACKGROUND_CONTEXT))
+			.resolves.toMatchObject({ agents: { researcher: { latestTask: "Add one more detail.", fresh: false } } });
 		await service.stop("researcher");
 		await expect(service.status("researcher")).resolves.toMatchObject({
 			conversationId: spawned.conversationId,
 			active: false,
 		});
 	});
+
+	it("provides live footer data with cumulative assistant turns and executed tool uses", async () => {
+		const { service, harness, faux, directory, model } = await setup([], 100);
+		const file = join(directory, "footer-input.txt");
+		await writeFile(file, "The footer test file.", "utf8");
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: file }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("The first request is complete."),
+			fauxAssistantMessage("still working ".repeat(100)),
+		]);
+
+		const spawned = await service.spawn("footer-worker", undefined, "Read the footer test file.");
+		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+		const sent = await service.send("footer-worker", "Check one more detail.");
+		const deadline = Date.now() + 5_000;
+		let summary;
+		while (Date.now() < deadline) {
+			const summaries = await service.footerSummaries();
+			summary = summaries.find(({ name }) => name === "footer-worker");
+			if (faux.state.callCount >= 3 && summary?.turns === 2 && summary.toolUses === 1) break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+
+		expect(summary).toMatchObject({
+			name: "footer-worker",
+			active: true,
+			modelLabel: model.id,
+			thinkingLevel: "off",
+			turns: 2,
+			toolUses: 1,
+			incomingCount: 2,
+			latestTask: "Check one more detail.",
+			fresh: false,
+		});
+		expect(summary?.contextTokens).toEqual(expect.any(Number));
+		expect(summary?.contextWindow).toBeGreaterThan(0);
+		await service.stop("footer-worker");
+		await harness.waitForTask(sent.reporterTaskId, BACKGROUND_CONTEXT);
+		await expect(service.footerSummaries()).resolves.toEqual([]);
+		await expect(service.footerSummaries(true)).resolves.toMatchObject([
+			{ name: "footer-worker", active: false, latestTask: "Check one more detail.", turns: 2, toolUses: 1 },
+		]);
+	}, 10_000);
 
 	it("makes requested names unique against idle registered agents", async () => {
 		const { service, harness } = await setup(["one", "two"]);

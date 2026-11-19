@@ -1,5 +1,6 @@
 export type AgentsCommand =
 	| { action: "help" | "presets" | "list" | "stats" }
+	| { action: "footer"; alwaysOn: boolean }
 	| { action: "status"; name: string }
 	| { action: "send"; name: string; message: string }
 	| { action: "stop"; name: string }
@@ -110,6 +111,12 @@ export function parseAgentsCommand(source: string): AgentsCommand {
 	if (action === "help" || action === "presets" || action === "list" || action === "stats") {
 		if (tail.length !== 0) throw new Error(`Unexpected arguments after "${action}".`);
 		return { action };
+	}
+	if (action === "footer") {
+		if (tail.length !== 1 || (tail[0] !== "alwaysOn" && tail[0] !== "activity")) {
+			throw new Error("Usage: /agents footer alwaysOn|activity");
+		}
+		return { action, alwaysOn: tail[0] === "alwaysOn" };
 	}
 	if (action === "status") {
 		if (tail.length !== 1) throw new Error("Usage: /agents status <agent-name>");

@@ -3,10 +3,14 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
+	AssistantEntry,
 	configure,
 	LiveDoc,
+	ToolResultEntry,
 	type ConversationId,
 	type Conversation,
+	type Cursor,
+	type EntryId,
 	type Harness,
 	type ModelRef,
 	type TaskId,
@@ -28,6 +32,27 @@ export interface AgentSummary {
 	outgoingCount: number;
 	usage: UsageTotals;
 }
+
+export interface AgentFooterSummary extends AgentSummary {
+	modelLabel: string;
+	thinkingLevel: ModelThinkingLevel;
+	turns: number;
+	toolUses: number;
+	contextTokens: number | null;
+	contextWindow: number | null;
+	latestTask: string;
+	fresh: boolean;
+}
+
+type AgentHistoryCounts = {
+	lastEntryId?: EntryId;
+	turns: number;
+	toolUses: number;
+	contextTokens: number | null;
+};
+
+const NON_EXECUTED_TOOL_DIAGNOSTICS = new Set(["aborted", "blocked", "invalid_arguments", "tool_unavailable"]);
+const HISTORY_PAGE_SIZE = 256;
 
 export interface UsageTotals {
 	input: number;
@@ -138,6 +163,7 @@ export class AgentService {
 	readonly #modelRegistry: ModelRegistry;
 	#parentModel: ModelRef;
 	#parentThinking: ModelThinkingLevel;
+	#footerHistory = new Map<ConversationId, AgentHistoryCounts>();
 
 	constructor(options: AgentServiceOptions) {
 		this.harness = options.harness;
@@ -200,6 +226,8 @@ export class AgentService {
 				inheritThinking: preset?.thinking === undefined,
 				incomingCount: 1,
 				outgoingCount: 0,
+				latestTask: message,
+				fresh: true,
 				reporterTaskIds: [reporterTaskId],
 			};
 			return { name, conversationId: child.id, reporterTaskId };
@@ -216,6 +244,8 @@ export class AgentService {
 			const agent = Object.hasOwn(state.agents, agentName) ? state.agents[agentName] : undefined;
 			if (agent === undefined) throw new Error(`No managed agent named "${agentName}".`);
 			agent.incomingCount = (agent.incomingCount ?? 0) + 1;
+			agent.latestTask = message;
+			agent.fresh = false;
 			agent.reporterTaskIds ??= [];
 			const reporterTaskId = await tx.createTask(
 				AgentReporter,
@@ -250,6 +280,90 @@ export class AgentService {
 			});
 		}
 		return summaries.sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
+	}
+
+	async footerSummaries(includeIdle = false): Promise<AgentFooterSummary[]> {
+		const state = await this.#state();
+		const records = (await Promise.all(
+			Object.entries(state.agents).map(async ([name, record]) => ({
+				name,
+				record,
+				active: (await this.harness.snapshot(LiveDoc, record.conversationId, BACKGROUND_CONTEXT))?.run !== undefined,
+			})),
+		)).filter(({ active }) => includeIdle || active);
+		const summaries = await Promise.all(
+			records.map(async ({ name, record, active }) => {
+				const [usageState, conversation] = await Promise.all([
+					this.harness.snapshot(UsageDoc, record.conversationId, BACKGROUND_CONTEXT),
+					this.harness.conversation(record.conversationId, BACKGROUND_CONTEXT),
+				]);
+				if (conversation === undefined) return undefined;
+				const [agent, history] = await Promise.all([
+					conversation.agent(BACKGROUND_CONTEXT),
+					this.#historyCounts(conversation, record.conversationId),
+				]);
+				const model = agent.model === undefined
+					? undefined
+					: this.#modelRegistry.find(agent.model.provider, agent.model.modelId);
+
+				return {
+					name,
+					conversationId: record.conversationId,
+					active,
+					presetId: record.presetId ?? null,
+					incomingCount: record.incomingCount ?? 0,
+					outgoingCount: record.outgoingCount ?? 0,
+					usage: aggregateUsage(usageState),
+					modelLabel: agent.model?.modelId ?? "no-model",
+					thinkingLevel: agent.thinkingLevel,
+					turns: history.turns,
+					toolUses: history.toolUses,
+					contextTokens: history.contextTokens,
+					contextWindow: model?.contextWindow ?? null,
+					latestTask: record.latestTask ?? "",
+					fresh: record.fresh === true,
+				};
+			}),
+		);
+		return summaries
+			.filter((summary): summary is AgentFooterSummary => summary !== undefined)
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	async #historyCounts(conversation: Conversation, conversationId: ConversationId): Promise<AgentHistoryCounts> {
+		const counts = this.#footerHistory.get(conversationId) ?? { turns: 0, toolUses: 0, contextTokens: null };
+		const lastEntryId = counts.lastEntryId;
+		const query = lastEntryId === undefined
+			? { order: "ascending" as const }
+			: { order: "ascending" as const, minEntryId: lastEntryId };
+		let cursor: Cursor | undefined;
+		let firstPage = true;
+		do {
+			const page = await conversation.entries(query, HISTORY_PAGE_SIZE, cursor, BACKGROUND_CONTEXT);
+			for (const entry of page.items) {
+				if (firstPage && entry.id === lastEntryId) continue;
+				if (AssistantEntry.is(entry)) {
+					counts.turns++;
+					const message = entry.model?.[0];
+					if (isAssistantMessage(message)) {
+						counts.contextTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+					}
+				} else if (ToolResultEntry.is(entry)) {
+					const message = entry.model?.[0];
+					const didNotExecute = entry.data.diagnostics.some((diagnostic) =>
+						diagnostic.code !== undefined && NON_EXECUTED_TOOL_DIAGNOSTICS.has(diagnostic.code),
+					);
+					if (message?.role === "toolResult" && !didNotExecute) {
+						counts.toolUses += 1 + (message.nestedCalls?.calls.length ?? 0);
+					}
+				}
+				counts.lastEntryId = entry.id;
+			}
+			firstPage = false;
+			cursor = page.next;
+		} while (cursor !== undefined);
+		this.#footerHistory.set(conversationId, counts);
+		return counts;
 	}
 
 	async status(name: string): Promise<AgentSummary> {

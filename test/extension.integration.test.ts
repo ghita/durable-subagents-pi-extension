@@ -56,7 +56,8 @@ describe("Pi extension integration", () => {
 		const commands = new Map<string, { handler(args: string, context: any): Promise<void>; getArgumentCompletions(prefix: string): Promise<any> | any }>();
 		const tools = new Map<string, any>();
 		const handlers = new Map<string, Array<(event: any, context: any) => Promise<void> | void>>();
-		const ui = { notify: (message: string) => notifications.push(message) };
+		const setFooter = vi.fn();
+		const ui = { notify: (message: string) => notifications.push(message), setFooter };
 		const sessionManager = {
 			getSessionFile: () => sessionFile,
 			getEntries: () => [...entries],
@@ -104,9 +105,9 @@ describe("Pi extension integration", () => {
 		await durableSubagents(pi);
 		await handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, context);
 		expect(commands.has("agents")).toBe(true);
-		expect(tools.has("subagent")).toBe(true);
+		expect(tools.has("durable_subagent")).toBe(true);
 
-		const tool = tools.get("subagent")!;
+		const tool = tools.get("durable_subagent")!;
 		const toolResult = (await tool.execute(
 			"tool-1",
 			{ action: "spawn", name: "analyst", message: "Inspect the sample and summarize it." },
@@ -133,6 +134,13 @@ describe("Pi extension integration", () => {
 		expect(await commands.get("agents")!.getArgumentCompletions("status ")).toEqual([
 			{ value: "status analyst", label: "analyst" },
 		]);
+
+		contextState.mode = "tui";
+		await commands.get("agents")!.handler("footer alwaysOn", commandContext);
+		await vi.waitFor(() => expect(setFooter).toHaveBeenCalledWith(expect.any(Function)));
+		expect(notifications.at(-1)).toContain("always on");
+		await commands.get("agents")!.handler("footer activity", commandContext);
+		expect(notifications.at(-1)).toContain("activity");
 
 		const nextModel = providerModels.getModel(model.provider, "faux-next")!;
 		contextState.model = nextModel;
