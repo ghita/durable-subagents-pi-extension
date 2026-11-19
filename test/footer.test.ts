@@ -14,6 +14,7 @@ function summary(name: string, overrides: Partial<AgentFooterSummary> = {}): Age
 		name,
 		conversationId: `conversation-${name}` as unknown as AgentFooterSummary["conversationId"],
 		active: true,
+		queued: false,
 		presetId: null,
 		incomingCount: 2,
 		outgoingCount: 1,
@@ -42,6 +43,12 @@ describe("agent footer formatting", () => {
 		expect(rendered).toContain("$0.004200");
 		expect(rendered).toContain("ctx ≈29k/1M (3%)");
 		expect(rendered).toContain("task: Inspect the sample and report the important details.");
+	});
+
+	it("renders a queued agent before its child conversation starts", () => {
+		const lines = renderAgentFooterLines([summary("scout", { active: false, queued: true })], 150, 8, false, theme);
+
+		expect(lines.join("\n")).toContain("… scout [fresh] · queued (gpt-6-luna · thinking low)");
 	});
 
 	it("renders the last agent status as idle when it is no longer running", () => {

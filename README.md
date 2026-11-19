@@ -69,7 +69,7 @@ Status and stats read Durable usage records for managed child conversations only
 
 ## Running-agent footer
 
-By default, in Pi's interactive TUI, the footer temporarily shows a moving spinner and a stacked status block for every running managed agent. Each block includes the agent name, its short model ID and thinking level, cumulative assistant turns and executed tool uses, cumulative message in/out counts and cost, an estimated context-token count, and a one-line preview of its latest request. `[fresh]` appears only for an agent's first task. Idle and completed agents are omitted, and the built-in footer returns when no managed agent is running.
+By default, in Pi's interactive TUI, the footer temporarily shows a moving spinner and a stacked status block for every running managed agent. Each block includes the agent name, its state (`queued`, `running`, or `idle`), short model ID and thinking level, cumulative assistant turns and executed tool uses, cumulative message in/out counts and cost, an estimated context-token count, and a one-line preview of its latest request. `[fresh]` appears only for an agent's first task. Idle and completed agents are omitted, and the built-in footer returns when no managed agent is running.
 
 Use `/agents footer alwaysOn` to keep the custom footer visible and show managed-agent summaries even after they become idle. `/agents footer activity` restores the default behavior, showing only active agents and keeping the footer for the three-second hide delay. This setting lasts for the current Pi extension process.
 

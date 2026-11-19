@@ -190,8 +190,10 @@ function getParentFooterLines(
 function agentSegments(agent: AgentFooterSummary, frame: number, theme: FooterTheme): string[] {
 	const indicator = agent.active
 		? theme.fg("accent", SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)
-		: theme.fg("dim", "○");
-	const state = agent.active ? "running" : "idle";
+		: agent.queued
+			? theme.fg("warning", "…")
+			: theme.fg("dim", "○");
+	const state = agent.active ? "running" : agent.queued ? "queued" : "idle";
 	const identity = `${indicator} ${theme.bold(agent.name)}${agent.fresh ? " [fresh]" : ""} · ${state} (${agent.modelLabel} · thinking ${agent.thinkingLevel})`;
 	const context = agent.contextTokens === null ? "ctx ?" : `ctx ≈${formatTokens(agent.contextTokens)}`;
 	const contextLimit = agent.contextWindow === null ? "?" : formatContextWindow(agent.contextWindow);
@@ -320,7 +322,7 @@ export class AgentFooterController {
 			if (this.#refreshAgain) {
 				this.#refreshAgain = false;
 				void this.#refresh();
-			} else if (this.#agents.some(({ active }) => active)) {
+			} else if (this.#agents.some(({ active, queued }) => active || queued)) {
 				this.#timer = setTimeout(() => {
 					this.#timer = undefined;
 					void this.#refresh();

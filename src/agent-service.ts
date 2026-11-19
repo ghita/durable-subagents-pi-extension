@@ -34,6 +34,8 @@ export interface AgentSummary {
 }
 
 export interface AgentFooterSummary extends AgentSummary {
+	/** A reporter task exists but the child conversation has not started running yet. */
+	queued: boolean;
 	modelLabel: string;
 	thinkingLevel: ModelThinkingLevel;
 	turns: number;
@@ -285,14 +287,14 @@ export class AgentService {
 	async footerSummaries(includeIdle = false): Promise<AgentFooterSummary[]> {
 		const state = await this.#state();
 		const records = (await Promise.all(
-			Object.entries(state.agents).map(async ([name, record]) => ({
-				name,
-				record,
-				active: (await this.harness.snapshot(LiveDoc, record.conversationId, BACKGROUND_CONTEXT))?.run !== undefined,
-			})),
-		)).filter(({ active }) => includeIdle || active);
+			Object.entries(state.agents).map(async ([name, record]) => {
+				const active = (await this.harness.snapshot(LiveDoc, record.conversationId, BACKGROUND_CONTEXT))?.run !== undefined;
+				const queued = !active && await this.#hasPendingReporter(record);
+				return { name, record, active, queued };
+			}),
+		)).filter(({ active, queued }) => includeIdle || active || queued);
 		const summaries = await Promise.all(
-			records.map(async ({ name, record, active }) => {
+			records.map(async ({ name, record, active, queued }) => {
 				const [usageState, conversation] = await Promise.all([
 					this.harness.snapshot(UsageDoc, record.conversationId, BACKGROUND_CONTEXT),
 					this.harness.conversation(record.conversationId, BACKGROUND_CONTEXT),
@@ -310,6 +312,7 @@ export class AgentService {
 					name,
 					conversationId: record.conversationId,
 					active,
+					queued,
 					presetId: record.presetId ?? null,
 					incomingCount: record.incomingCount ?? 0,
 					outgoingCount: record.outgoingCount ?? 0,
@@ -328,6 +331,14 @@ export class AgentService {
 		return summaries
 			.filter((summary): summary is AgentFooterSummary => summary !== undefined)
 			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	async #hasPendingReporter(record: ManagedAgentRecord): Promise<boolean> {
+		for (const taskId of record.reporterTaskIds ?? []) {
+			const task = await this.harness.getTask(taskId, BACKGROUND_CONTEXT);
+			if (task !== undefined && task.state.status !== "terminal") return true;
+		}
+		return false;
 	}
 
 	async #historyCounts(conversation: Conversation, conversationId: ConversationId): Promise<AgentHistoryCounts> {
