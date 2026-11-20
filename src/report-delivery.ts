@@ -20,7 +20,7 @@ export interface PiReportTransport {
 	getEntries(): readonly ReportEntryLike[];
 	sendMessage(
 		message: PiReportMessage,
-		options: { triggerTurn: true; deliverAs: "followUp" },
+		options: { triggerTurn: true; deliverAs: "steer" },
 	): void;
 	/** Resolve only after Pi's session manager contains the custom message; false means shutdown interrupted delivery. */
 	waitForRecorded(reportId: string): Promise<boolean>;
@@ -42,9 +42,10 @@ export function hasPiReportEntry(entries: readonly ReportEntryLike[], reportId: 
 
 /**
  * Deliver a report as an extension-authored custom message, never as a user
- * command. Pi's public sendMessage API queues follow-ups while busy and starts
- * a turn when idle. Since Pi and Durable persist separately, the stable ID is
- * checked against the Pi transcript before acknowledging the durable report.
+ * command. Pi's public sendMessage API steers the report into the next model
+ * call after the current tool batch when busy, and starts a turn when idle.
+ * Since Pi and Durable persist separately, the stable ID is checked against
+ * the Pi transcript before acknowledging the durable report.
  *
  * Pi's sendMessage API returns void and a busy session may only enqueue the
  * custom message in memory. Do not acknowledge until the session manager shows
@@ -67,7 +68,7 @@ export async function deliverPiReport(
 				display: true,
 				details: { reportId: report.id, agentName: report.agentName },
 			},
-			{ triggerTurn: true, deliverAs: "followUp" },
+			{ triggerTurn: true, deliverAs: "steer" },
 		);
 		if (!(await transport.waitForRecorded(report.id))) return { deliveredNow: true, acknowledged: false };
 	}

@@ -131,7 +131,7 @@ Adapt the example's structure:
 
 ### Bridging reports back into Pi
 
-The example reports to a durable “main” conversation, but the extension's real main conversation is Pi's session. Bridge completed reports through Pi's extension API (prefer a custom `pi.sendMessage` report that participates in context and is queued as a follow-up; trigger a turn when Pi is idle). Include the agent name and a stable report ID in the message/details.
+The example reports to a durable “main” conversation, but the extension's real main conversation is Pi's session. Bridge completed reports through Pi's extension API as custom `pi.sendMessage` steering messages that participate in context. While Pi is busy, the report is queued for the next model call after the current tool batch; when Pi is idle, trigger a turn immediately. Include the agent name and a stable report ID in the message/details.
 
 Because the durable database and Pi transcript are separate stores, report delivery cannot be one atomic transaction. Make delivery idempotent as far as the public Pi API permits: persist a stable report ID, check for an already-recorded report before retrying after reopen, and increment the logical outgoing-report counter once. Add a recovery test for a crash around report delivery. Do not inject a report as an actual user command; use an extension-authored message so it cannot dispatch slash commands.
 

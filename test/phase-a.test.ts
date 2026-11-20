@@ -102,7 +102,7 @@ describe("Phase A Pi report delivery spike", () => {
 		return { entries, sent, transport };
 	}
 
-	it("uses a custom follow-up message and starts the main turn when idle", async () => {
+	it("steers a custom report into the main turn and starts a turn when idle", async () => {
 		const { sent, transport } = makeTransport();
 		const acknowledge = vi.fn(async () => {});
 
@@ -113,7 +113,7 @@ describe("Phase A Pi report delivery spike", () => {
 				content: expect.stringContaining("Subagent researcher report"),
 				details: { reportId: report.id, agentName: report.agentName },
 			}),
-			{ triggerTurn: true, deliverAs: "followUp" },
+			{ triggerTurn: true, deliverAs: "steer" },
 		);
 		expect(sent).toHaveLength(1);
 		expect(acknowledge).toHaveBeenCalledExactlyOnceWith(report.id);
@@ -140,7 +140,7 @@ describe("Phase A Pi report delivery spike", () => {
 		expect(acknowledged).toBe(1);
 	});
 
-	it("does not count a queued follow-up until Pi records it in the transcript", async () => {
+	it("does not count a queued steering report until Pi records it in the transcript", async () => {
 		const entries: ReportEntryLike[] = [];
 		const sendMessage = vi.fn();
 		let release!: (recorded: boolean) => void;

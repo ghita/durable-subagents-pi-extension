@@ -120,6 +120,9 @@ describe("Pi extension integration", () => {
 		expect(tools.has("durable_subagent")).toBe(true);
 
 		const tool = tools.get("durable_subagent")!;
+		expect(tool.promptSnippet).toContain("acknowledgments, not results");
+		expect(tool.description).toContain("list/status return state, usage, and message counts only—not report text");
+
 		const toolResult = (await tool.execute(
 			"tool-1",
 			{ action: "spawn", name: "analyst", message: "Inspect the sample and summarize it." },
@@ -127,12 +130,27 @@ describe("Pi extension integration", () => {
 			undefined,
 			context as ExtensionToolContext,
 		)) as AgentToolResult;
-		expect(toolResult.content?.[0]).toMatchObject({ type: "text", text: expect.stringContaining("Started analyst") });
+		expect(toolResult.content?.[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("Started analyst asynchronously. This is an acknowledgment, not the result."),
+		});
+
+		const statusResult = (await tool.execute(
+			"tool-status",
+			{ action: "status", name: "analyst" },
+			undefined,
+			undefined,
+			context as ExtensionToolContext,
+		)) as AgentToolResult;
+		expect(statusResult.content?.[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("Status snapshot only—not the agent's report."),
+		});
 
 		const deadline = Date.now() + 5_000;
 		while (messages.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(messages).toHaveLength(1);
-		expect(messages[0]?.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+		expect(messages[0]?.options).toEqual({ triggerTurn: true, deliverAs: "steer" });
 		expect(messages[0]?.message).toMatchObject({
 			customType: "durable-subagent-report",
 			content: expect.stringContaining("The delegated answer."),

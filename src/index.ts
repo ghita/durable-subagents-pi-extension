@@ -18,17 +18,17 @@ import { openManagedSessionRuntime, type ManagedSessionRuntime, requireSessionFi
 
 const SubagentParameters = Type.Object({
 	action: Type.Union([
-		Type.Literal("spawn"),
-		Type.Literal("send"),
-		Type.Literal("list"),
-		Type.Literal("status"),
-		Type.Literal("stop"),
-		Type.Literal("stop-all"),
-		Type.Literal("stats"),
+		Type.Literal("spawn", { description: "Start a named agent asynchronously. Returns an acknowledgment; its report is steered to the main agent at the next model-call boundary." }),
+		Type.Literal("send", { description: "Submit a new task to an existing agent asynchronously. This does not fetch an existing report." }),
+		Type.Literal("list", { description: "Return agent status snapshots only; does not include report text." }),
+		Type.Literal("status", { description: "Return one agent's status snapshot only; idle does not mean its report is included here." }),
+		Type.Literal("stop", { description: "Stop an agent's current work while retaining its conversation and history." }),
+		Type.Literal("stop-all", { description: "Stop all currently active managed agents." }),
+		Type.Literal("stats", { description: "Return cumulative managed-agent usage and costs." }),
 	]),
-	name: Type.Optional(Type.String({ description: "Meaningful registered agent name; required for send/status/stop" })),
-	presetId: Type.Optional(Type.String({ description: "Optional cached preset ID for spawn" })),
-	message: Type.Optional(Type.String({ description: "Initial task for spawn or instruction for send" })),
+	name: Type.Optional(Type.String({ description: "Meaningful agent name; required for send/status/stop and optional for spawn when presetId is supplied." })),
+	presetId: Type.Optional(Type.String({ description: "Optional cached preset ID for spawn. If omitted, a matching preset name is selected automatically." })),
+	message: Type.Optional(Type.String({ description: "Task for spawn or a new task/instruction for send. send creates new work; it is not a result lookup." })),
 });
 
 let activeRuntime: ManagedSessionRuntime | undefined;
@@ -101,6 +101,9 @@ function describePresetIds(ids: readonly string[]): string {
 	return ids.length === 0 ? "No configured presets are currently cached." : `Cached presets: ${ids.join(", ")}.`;
 }
 
+const STATUS_SNAPSHOT_GUIDANCE =
+	"Status snapshot only—not the agent's report. Idle means no work is active; a completed report may still be queued until the next model call. Messages in/out counts accepted instructions/reports recorded in Pi. Reports arrive separately as steering messages; do not poll status/list or send the task again to retrieve one.";
+
 async function observeAgent(runtime: ManagedSessionRuntime, name: string, conversationId: ConversationId): Promise<void> {
 	try {
 		await runtime.herdrMonitor?.trackAgent(name, conversationId);
@@ -114,11 +117,12 @@ async function runToolAction(
 	args: { action: string; name?: string; presetId?: string; message?: string },
 ): Promise<{ text: string; details?: unknown }> {
 	const { service } = runtime;
-	if (args.action === "list") return { text: formatAgentList(await service.list()) };
+	if (args.action === "list") return { text: `${formatAgentList(await service.list())}\n\n${STATUS_SNAPSHOT_GUIDANCE}` };
 	if (args.action === "status") {
-		return args.name === undefined
-			? { text: formatAgentList(await service.list()) }
-			: { text: formatAgentSummary(await service.status(args.name)) };
+		const snapshot = args.name === undefined
+			? formatAgentList(await service.list())
+			: formatAgentSummary(await service.status(args.name));
+		return { text: `${snapshot}\n\n${STATUS_SNAPSHOT_GUIDANCE}` };
 	}
 	if (args.action === "stats") {
 		const stats = await service.stats();
@@ -138,7 +142,7 @@ async function runToolAction(
 		const result = await service.spawn(args.name, args.presetId, args.message);
 		await observeAgent(runtime, result.name, result.conversationId);
 		return {
-			text: `Started ${result.name}; the agent is working independently and will report when finished.`,
+			text: `Started ${result.name} asynchronously. This is an acknowledgment, not the result. Its report arrives separately as a Pi steering message; if the main agent is busy, it is delivered at the next model call after the current tool batch completes. Continue other work meanwhile; do not poll status/list or resend the task to retrieve the report.`,
 			details: { name: result.name, conversationId: result.conversationId },
 		};
 	}
@@ -148,7 +152,10 @@ async function runToolAction(
 		}
 		const result = await service.send(args.name, args.message);
 		await observeAgent(runtime, args.name, result.conversationId);
-		return { text: `Sent a steering instruction to ${args.name}.`, details: { name: args.name, reporterTaskId: result.reporterTaskId } };
+		return {
+			text: `Submitted a new task to ${args.name} asynchronously. This is an acknowledgment, not the result; its report will arrive separately as a Pi steering message at the next model call. Sending again creates additional work and does not retrieve a pending report.`,
+			details: { name: args.name, reporterTaskId: result.reporterTaskId },
+		};
 	}
 	throw new Error(`Unknown subagent action "${args.action}".`);
 }
@@ -219,10 +226,10 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 	pi.registerTool({
 		name: "durable_subagent",
 		label: "Durable Subagent",
-		promptSnippet: "Spawn, steer, inspect, and stop persistent named background agents.",
+		promptSnippet: "Manage persistent agents asynchronously. spawn/send return acknowledgments, not results; completed reports arrive separately as Pi steering messages at the next model-call boundary after current tool calls. list/status are status snapshots only, never report retrieval. Idle means no active work, not necessarily that the report has been delivered. Do not poll or resend to fetch a report.",
 		description:
-			"Manage persistent named background agents. Actions: spawn (choose a meaningful name, optional presetId, and task), send (name and message; steers busy work), list, status (optionally name), stop (name), stop-all, stats. " +
-			`Choose a relevant configured preset when useful. ${describePresetIds(presetIds)} If no preset applies, all durable-native coding tools are enabled. Reports return as extension-authored follow-up messages.`,
+			"Manage persistent named background agents. spawn and send are asynchronous: they acknowledge accepted work but do not return its answer. The completed answer is delivered separately as an extension-authored Pi steering message; if Pi is busy, it is queued for the next model call after current tool calls finish. list/status return state, usage, and message counts only—not report text. Idle means no work is active; it does not guarantee the report is already in the main transcript. Do not poll list/status or send the task again to retrieve an answer. Actions: spawn (name/presetId/message), send (name/message; creates new work), list, status (optionally name), stop, stop-all, stats. " +
+			`Choose a relevant configured preset when useful. ${describePresetIds(presetIds)} If no preset applies, all durable-native coding tools are enabled.`,
 		parameters: SubagentParameters,
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 		execute: async (_toolCallId, args, _signal, _onUpdate, context: ExtensionToolContext) => {
