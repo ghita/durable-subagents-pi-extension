@@ -14,6 +14,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { AgentService } from "./agent-service.ts";
+import { HerdrAgentMonitor, herdrApiFromEnvironment } from "./herdr-monitor.ts";
 import { SubagentsDoc } from "./agent-state.ts";
 import { createPiModelBridge, modelReference } from "./model-bridge.ts";
 import { loadPresetCatalog } from "./presets.ts";
@@ -27,6 +28,7 @@ export interface ManagedSessionRuntime {
 	sessionFile: string;
 	databasePath: string;
 	service: AgentService;
+	herdrMonitor?: HerdrAgentMonitor;
 	close(): Promise<void>;
 }
 
@@ -91,6 +93,18 @@ export async function openManagedSessionRuntime(
 	});
 	await service.updateInherited(parentModel, parentThinking);
 
+	const herdr = herdrApiFromEnvironment();
+	const herdrMonitor = herdr === undefined
+		? undefined
+		: new HerdrAgentMonitor({ api: herdr.api, currentPane: herdr.currentPane, cwd, harness, service });
+	if (herdrMonitor !== undefined) {
+		try {
+			await herdrMonitor.attachPersistedAgents();
+		} catch (error) {
+			console.error("[durable-subagents] Could not restore Herdr agent tabs:", error);
+		}
+	}
+
 	let drainTail: Promise<void> = Promise.resolve();
 	let isClosed = false;
 	const drainReports = (): void => {
@@ -138,10 +152,12 @@ export async function openManagedSessionRuntime(
 		sessionFile,
 		databasePath,
 		service,
+		herdrMonitor,
 		async close() {
 			if (isClosed) return;
 			isClosed = true;
 			observation.detach();
+			await herdrMonitor?.close();
 			await drainTail;
 			await harness.close(BACKGROUND_CONTEXT);
 		},

@@ -94,8 +94,13 @@ describe("AgentService durable lifecycle", () => {
 		expect(first.outgoingCount).toBe(0);
 		await expect(harness.snapshot(SubagentsDoc, root.id, BACKGROUND_CONTEXT))
 			.resolves.toMatchObject({ agents: { researcher: { latestTask: "Find one useful fact.", fresh: true } } });
+		const herdrTarget = { tabId: "w1:t2", paneId: "w1:p2" };
+		await service.setHerdrTarget("researcher", herdrTarget);
+		expect(await service.herdrTarget("researcher")).toEqual(herdrTarget);
+		expect(await service.herdrAgents()).toEqual([{ name: "researcher", conversationId: spawned.conversationId }]);
 
 		const sent = await service.send("researcher", "Add one more detail.");
+		expect(sent.conversationId).toBe(spawned.conversationId);
 		await harness.waitForTask(sent.reporterTaskId, BACKGROUND_CONTEXT);
 		const reports = await service.pendingReports();
 		expect(reports).toHaveLength(2);

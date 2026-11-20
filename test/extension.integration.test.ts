@@ -6,12 +6,24 @@ import type { Model } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import durableSubagents from "../src/index.ts";
 
 const directories: string[] = [];
+let priorHerdrEnv: string | undefined;
+let priorHerdrWorkspaceId: string | undefined;
+beforeEach(() => {
+	priorHerdrEnv = process.env.HERDR_ENV;
+	priorHerdrWorkspaceId = process.env.HERDR_WORKSPACE_ID;
+	delete process.env.HERDR_ENV;
+	delete process.env.HERDR_WORKSPACE_ID;
+});
 afterEach(async () => {
 	await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+	if (priorHerdrEnv === undefined) delete process.env.HERDR_ENV;
+	else process.env.HERDR_ENV = priorHerdrEnv;
+	if (priorHerdrWorkspaceId === undefined) delete process.env.HERDR_WORKSPACE_ID;
+	else process.env.HERDR_WORKSPACE_ID = priorHerdrWorkspaceId;
 });
 
 describe("Pi extension integration", () => {

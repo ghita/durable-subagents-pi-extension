@@ -79,6 +79,12 @@ export interface SpawnResult {
 export interface MessageResult {
 	reporterTaskId: TaskId<null>;
 	requestId: string;
+	conversationId: ConversationId;
+}
+
+export interface HerdrTarget {
+	tabId: string;
+	paneId: string;
 }
 
 export interface AgentServiceOptions {
@@ -224,6 +230,7 @@ export class AgentService {
 			state.agents[name] = {
 				conversationId: child.id,
 				presetId,
+				herdrTarget: null,
 				inheritModel: preset?.model === undefined,
 				inheritThinking: preset?.thinking === undefined,
 				incomingCount: 1,
@@ -261,7 +268,7 @@ export class AgentService {
 				{ ownership: { kind: "conversation" }, background: true },
 			);
 			agent.reporterTaskIds.push(reporterTaskId);
-			return { reporterTaskId, requestId: `managed-agent:${operationId}` };
+			return { reporterTaskId, requestId: `managed-agent:${operationId}`, conversationId: agent.conversationId };
 		}, BACKGROUND_CONTEXT);
 	}
 
@@ -375,6 +382,29 @@ export class AgentService {
 		} while (cursor !== undefined);
 		this.#footerHistory.set(conversationId, counts);
 		return counts;
+	}
+
+	async herdrTarget(name: string): Promise<HerdrTarget | undefined> {
+		const state = await this.#state();
+		const target = state.agents[validateAgentName(name)]?.herdrTarget;
+		return target == null ? undefined : { ...target };
+	}
+
+	async herdrAgents(): Promise<Array<{ name: string; conversationId: ConversationId }>> {
+		const state = await this.#state();
+		return Object.entries(state.agents)
+			.filter(([, agent]) => agent.herdrTarget != null)
+			.map(([name, agent]) => ({ name, conversationId: agent.conversationId }));
+	}
+
+	async setHerdrTarget(name: string, target: HerdrTarget): Promise<void> {
+		const agentName = validateAgentName(name);
+		await this.root.commit(async (tx) => {
+			const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
+			const agent = Object.hasOwn(state.agents, agentName) ? state.agents[agentName] : undefined;
+			if (agent === undefined) throw new Error(`No managed agent named "${agentName}".`);
+			agent.herdrTarget = { tabId: target.tabId, paneId: target.paneId };
+		}, BACKGROUND_CONTEXT);
 	}
 
 	async status(name: string): Promise<AgentSummary> {

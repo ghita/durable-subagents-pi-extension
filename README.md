@@ -35,6 +35,12 @@ Names containing spaces can be quoted. If a spawn name matches a preset ID, that
 
 The `subagent` tool supports `spawn`, `send`, `list`, `status`, `stop`, `stop-all`, and `stats`. It shares the same registry, presets, history, and service as `/agents`.
 
+## Herdr live agent panes
+
+When the extension runs in a Herdr-managed pane, each newly spawned agent gets its own non-focused split pane in the current Herdr tab. The first agent splits to the right of the main pane; each additional agent splits below the last agent within that right-side area. This preserves the main pane's width while stacking agents in rows instead of creating more thin columns, and the right-side rows are resized to equal heights as agents are added. Each pane is associated with its durable agent, so sending more work reuses it; the association is persisted with the managed-agent registry and restored when the Pi session resumes. Panes remain open after an agent finishes.
+
+The extension observes each Durable conversation and uses Herdr's supported CLI/API to update pane metadata and print concise status, thinking-level, tool-name/status, the three latest input messages (up to 500 characters each), and the latest assistant response (up to 600 characters) in the pane terminal. Tool arguments and results are not copied. Concurrent agents update separate panes. Existing managed-agent panes are reflowed into an equally sized right-side stack in the current tab when the session resumes; a pane closed during a session is recreated on the next agent update. The integration is enabled only when `HERDR_ENV=1` and `HERDR_WORKSPACE_ID` are present and the `herdr` CLI is available; failures are logged and do not stop agent work.
+
 ## Presets
 
 Presets are user-global at:

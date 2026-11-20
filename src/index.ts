@@ -6,6 +6,7 @@ import {
 	type ExtensionToolContext,
 } from "@earendil-works/pi-coding-agent";
 import type { Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import { AgentService } from "./agent-service.ts";
 import { AgentFooterController } from "./footer.ts";
 import { getAgentCompletions } from "./autocomplete.ts";
@@ -100,10 +101,19 @@ function describePresetIds(ids: readonly string[]): string {
 	return ids.length === 0 ? "No configured presets are currently cached." : `Cached presets: ${ids.join(", ")}.`;
 }
 
+async function observeAgent(runtime: ManagedSessionRuntime, name: string, conversationId: ConversationId): Promise<void> {
+	try {
+		await runtime.herdrMonitor?.trackAgent(name, conversationId);
+	} catch (error) {
+		console.error(`[durable-subagents] Could not update Herdr for ${name}:`, error);
+	}
+}
+
 async function runToolAction(
-	service: AgentService,
+	runtime: ManagedSessionRuntime,
 	args: { action: string; name?: string; presetId?: string; message?: string },
 ): Promise<{ text: string; details?: unknown }> {
+	const { service } = runtime;
 	if (args.action === "list") return { text: formatAgentList(await service.list()) };
 	if (args.action === "status") {
 		return args.name === undefined
@@ -126,6 +136,7 @@ async function runToolAction(
 	if (args.action === "spawn") {
 		if (args.message === undefined || args.message.trim() === "") throw new Error("spawn needs a task message.");
 		const result = await service.spawn(args.name, args.presetId, args.message);
+		await observeAgent(runtime, result.name, result.conversationId);
 		return {
 			text: `Started ${result.name}; the agent is working independently and will report when finished.`,
 			details: { name: result.name, conversationId: result.conversationId },
@@ -136,6 +147,7 @@ async function runToolAction(
 			throw new Error("send needs an agent name and a non-empty message.");
 		}
 		const result = await service.send(args.name, args.message);
+		await observeAgent(runtime, args.name, result.conversationId);
 		return { text: `Sent a steering instruction to ${args.name}.`, details: { name: args.name, reporterTaskId: result.reporterTaskId } };
 	}
 	throw new Error(`Unknown subagent action "${args.action}".`);
@@ -190,11 +202,13 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 					return `Stopped ${command.name}; its durable conversation and history are retained.`;
 				}
 				if (command.action === "send") {
-					await runtime.service.send(command.name, command.message);
+					const result = await runtime.service.send(command.name, command.message);
+					await observeAgent(runtime, command.name, result.conversationId);
 					return `Sent a steering instruction to ${command.name}.`;
 				}
 				if (command.action === "spawn") {
 					const result = await runtime.service.spawn(command.name, command.presetId, command.message);
+					await observeAgent(runtime, result.name, result.conversationId);
 					return `Started ${result.name}; the agent is working independently and will report when finished.`;
 				}
 				throw new Error(`Unsupported /agents action "${command.action}".`);
@@ -214,7 +228,7 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 		execute: async (_toolCallId, args, _signal, _onUpdate, context: ExtensionToolContext) => {
 			try {
 				const runtime = await getRuntime(pi, context);
-				const result = await runToolAction(runtime.service, args);
+				const result = await runToolAction(runtime, args);
 				return {
 					content: [{ type: "text" as const, text: result.text }],
 					details: result.details ?? {},

@@ -7,6 +7,7 @@ import {
 
 export interface ManagedAgentRecord extends JsonObject {
 	conversationId: ConversationId;
+	herdrTarget: { tabId: string; paneId: string } | null;
 	presetId: string | null;
 	inheritModel: boolean;
 	inheritThinking: boolean;
