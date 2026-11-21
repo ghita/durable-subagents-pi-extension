@@ -52,5 +52,9 @@
   "dependencies": {
     "@earendil-works/pi-durable": "^1.5.2",
     "yaml": "^2.9.1"
+  },
+  "allowScripts": {
+    "@google/genai@2.21.0": true,
+    "protobufjs@7.6.6": true
   }
 }

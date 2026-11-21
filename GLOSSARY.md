@@ -33,3 +33,11 @@ A response from a managed agent delivered to the main agent. Count it when deliv
 **Persistent Pi session**:
 A Pi session backed by a saved transcript path that can be reopened. Durable managed agents require this session type; temporary or transcript-less sessions are unsupported.
 _Avoid_: Durable session (when referring only to Pi's transcript)
+
+## Agent capabilities
+
+**Agent tool set**:
+The exact set of tools enabled for a managed agent. The model may call each directly, and Code Mode scripts may call enabled tools other than Code Mode.
+
+**Code Mode**:
+An optional managed-agent capability for composing calls to tools in that agent's tool set into a script.
