@@ -256,11 +256,13 @@ export class AgentFooterController {
 	#agents: AgentFooterSummary[] = [];
 	#tui: FooterTui | undefined;
 	#alwaysOn: boolean;
+	#refreshFailureLogged = false;
 
 	constructor(
 		private readonly context: ExtensionContext,
 		private readonly service: AgentService,
 		alwaysOn = false,
+		private readonly onError: (error: unknown) => void = () => undefined,
 	) {
 		this.#alwaysOn = alwaysOn;
 	}
@@ -302,6 +304,7 @@ export class AgentFooterController {
 			do {
 				this.#refreshAgain = false;
 				const agents = await this.service.footerSummaries(this.#alwaysOn);
+				this.#refreshFailureLogged = false;
 				if (this.#disposed) return;
 				this.#agents = agents;
 				if (agents.some(({ active }) => active)) {
@@ -314,8 +317,10 @@ export class AgentFooterController {
 					this.#tui?.requestRender();
 				}
 			} while (this.#refreshAgain && !this.#disposed);
-		} catch {
+		} catch (error) {
 			// A transient snapshot failure should not take the footer or the extension down.
+			if (!this.#refreshFailureLogged) this.onError(error);
+			this.#refreshFailureLogged = true;
 		} finally {
 			this.#refreshing = false;
 			if (this.#disposed) return;

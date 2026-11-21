@@ -8,6 +8,8 @@ import {
 export interface ManagedAgentRecord extends JsonObject {
 	conversationId: ConversationId;
 	herdrTarget: { tabId: string; paneId: string } | null;
+	/** Version of the append-only terminal header last written to its associated Herdr pane. */
+	herdrOutputVersion: number | null;
 	presetId: string | null;
 	inheritModel: boolean;
 	inheritThinking: boolean;

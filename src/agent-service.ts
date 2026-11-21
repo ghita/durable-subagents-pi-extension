@@ -231,6 +231,7 @@ export class AgentService {
 				conversationId: child.id,
 				presetId,
 				herdrTarget: null,
+				herdrOutputVersion: null,
 				inheritModel: preset?.model === undefined,
 				inheritThinking: preset?.thinking === undefined,
 				incomingCount: 1,
@@ -404,6 +405,21 @@ export class AgentService {
 			const agent = Object.hasOwn(state.agents, agentName) ? state.agents[agentName] : undefined;
 			if (agent === undefined) throw new Error(`No managed agent named "${agentName}".`);
 			agent.herdrTarget = { tabId: target.tabId, paneId: target.paneId };
+		}, BACKGROUND_CONTEXT);
+	}
+
+	async herdrOutputVersion(name: string): Promise<number | undefined> {
+		const state = await this.#state();
+		return state.agents[validateAgentName(name)]?.herdrOutputVersion ?? undefined;
+	}
+
+	async setHerdrOutputVersion(name: string, version: number): Promise<void> {
+		const agentName = validateAgentName(name);
+		await this.root.commit(async (tx) => {
+			const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
+			const agent = Object.hasOwn(state.agents, agentName) ? state.agents[agentName] : undefined;
+			if (agent === undefined) throw new Error(`No managed agent named "${agentName}".`);
+			agent.herdrOutputVersion = version;
 		}, BACKGROUND_CONTEXT);
 	}
 

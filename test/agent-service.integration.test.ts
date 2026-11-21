@@ -97,6 +97,9 @@ describe("AgentService durable lifecycle", () => {
 		const herdrTarget = { tabId: "w1:t2", paneId: "w1:p2" };
 		await service.setHerdrTarget("researcher", herdrTarget);
 		expect(await service.herdrTarget("researcher")).toEqual(herdrTarget);
+		expect(await service.herdrOutputVersion("researcher")).toBeUndefined();
+		await service.setHerdrOutputVersion("researcher", 1);
+		expect(await service.herdrOutputVersion("researcher")).toBe(1);
 		expect(await service.herdrAgents()).toEqual([{ name: "researcher", conversationId: spawned.conversationId }]);
 
 		const sent = await service.send("researcher", "Add one more detail.");

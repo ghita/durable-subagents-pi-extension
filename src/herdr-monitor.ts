@@ -1,14 +1,23 @@
 import { execFile } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { connect } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { AssistantEntry, UserEntry, type AgentState, type ConversationId, type ConversationView, type ConversationWatch, type Harness, type LiveState } from "@earendil-works/pi-durable";
+import type { AssistantMessage, ToolCall, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
+import { AssistantEntry, ToolResultEntry, UserEntry, type AgentState, type ConversationId, type ConversationView, type ConversationWatch, type EntryId, type Harness, type ModelRef } from "@earendil-works/pi-durable";
 import type { AgentService, HerdrTarget } from "./agent-service.ts";
 
 const execFileAsync = promisify(execFile);
 const HERDR_SOURCE = "pi-durable-subagents";
 const HERDR_AGENT = "pi";
 const METADATA_TTL_MS = 24 * 60 * 60 * 1000;
+const HERDR_OUTPUT_VERSION = 1;
+const HERDR_RENDERER_PATH = fileURLToPath(new URL("./herdr-pane-renderer.cjs", import.meta.url));
+const RENDERER_START_TIMEOUT_MS = 5_000;
+const RENDERER_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface HerdrMetadata {
 	displayAgent: string;
@@ -30,7 +39,7 @@ export interface HerdrApi {
 	paneLayout(paneId: string): Promise<HerdrPaneGeometry[]>;
 	resizePane(paneId: string, direction: "up" | "down", amount: number): Promise<void>;
 	reportMetadata(paneId: string, metadata: HerdrMetadata): Promise<void>;
-	writeProgress(paneId: string, text: string): Promise<void>;
+	appendText(paneId: string, text: string): Promise<void>;
 }
 
 export type HerdrCommandRunner = (args: readonly string[]) => Promise<string>;
@@ -53,10 +62,68 @@ function apiResult(output: string): Record<string, any> {
 	return result as Record<string, any>;
 }
 
-/** Herdr's CLI is the supported client for its local socket API. */
+function rendererSocketPath(paneId: string): string {
+	const workspaceId = process.env.HERDR_WORKSPACE_ID ?? "local";
+	const herdrSocketPath = process.env.HERDR_SOCKET_PATH ?? "local";
+	const suffix = createHash("sha256").update(`${herdrSocketPath}\0${workspaceId}\0${paneId}`).digest("hex").slice(0, 24);
+	return process.platform === "win32"
+		? `\\\\.\\pipe\\durable-subagents-${suffix}`
+		: join(tmpdir(), `dsa-${suffix}.sock`);
+}
+
+function rendererRequest(
+	socketPath: string,
+	request: { type: "ping"; id: string } | { type: "append"; id: string; text: string },
+	timeoutMs = RENDERER_REQUEST_TIMEOUT_MS,
+): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const socket = connect(socketPath);
+		let settled = false;
+		let responseBuffer = "";
+		const timeout = setTimeout(() => finish(new Error("Timed out waiting for Herdr pane renderer.")), timeoutMs);
+
+		const finish = (error?: Error) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			socket.destroy();
+			if (error === undefined) resolve();
+			else reject(error);
+		};
+
+		socket.setEncoding("utf8");
+		socket.once("connect", () => {
+			socket.write(`${JSON.stringify(request)}\n`, (error) => {
+				if (error !== undefined && error !== null) finish(error);
+			});
+		});
+		socket.on("data", (chunk: string) => {
+			responseBuffer += chunk;
+			const newline = responseBuffer.indexOf("\n");
+			if (newline === -1) return;
+			try {
+				const response = JSON.parse(responseBuffer.slice(0, newline)) as { id?: unknown; ok?: unknown; error?: unknown };
+				if (response.id !== request.id || response.ok !== true) {
+					finish(new Error(typeof response.error === "string" ? response.error : "Herdr pane renderer rejected the update."));
+					return;
+				}
+				finish();
+			} catch (error) {
+				finish(error instanceof Error ? error : new Error("Invalid response from Herdr pane renderer."));
+			}
+		});
+		socket.once("error", (error) => finish(error));
+		socket.once("end", () => {
+			if (!settled) finish(new Error("Herdr pane renderer closed the connection without acknowledging the update."));
+		});
+	});
+}
+
+/** Herdr's CLI handles pane management; a persistent pane-side process renders transcript text over local IPC. */
 export class HerdrCliApi implements HerdrApi {
 	readonly #run: HerdrCommandRunner;
 	readonly #currentTabId?: string;
+	readonly #appendTails = new Map<string, Promise<void>>();
 
 	constructor(run: HerdrCommandRunner = defaultHerdrCommand, currentTabId = process.env.HERDR_TAB_ID) {
 		this.#run = run;
@@ -135,10 +202,50 @@ export class HerdrCliApi implements HerdrApi {
 		await this.#run(args);
 	}
 
-	async writeProgress(paneId: string, text: string): Promise<void> {
-		const encoded = Buffer.from(text, "utf8").toString("base64");
-		const command = `node -e "process.stdout.write('\\x1b[3J\\x1b[2J\\x1b[H' + Buffer.from('${encoded}','base64').toString() + '\\n')"`;
+	async appendText(paneId: string, text: string): Promise<void> {
+		const previous = this.#appendTails.get(paneId) ?? Promise.resolve();
+		const queued = previous.catch(() => undefined).then(() => this.#appendTextNow(paneId, text));
+		this.#appendTails.set(paneId, queued);
+		try {
+			await queued;
+		} finally {
+			if (this.#appendTails.get(paneId) === queued) this.#appendTails.delete(paneId);
+		}
+	}
+
+	async #appendTextNow(paneId: string, text: string): Promise<void> {
+		// Bootstrap the renderer once per pane; subsequent transcript updates use its local socket.
+		const socketPath = rendererSocketPath(paneId);
+		await this.#ensureRenderer(paneId, socketPath);
+		const contents = text.endsWith("\n") ? text : `${text}\n`;
+		await rendererRequest(socketPath, { type: "append", id: randomUUID(), text: contents });
+	}
+
+	async #ensureRenderer(paneId: string, socketPath: string): Promise<void> {
+		try {
+			await rendererRequest(socketPath, { type: "ping", id: randomUUID() }, 500);
+			return;
+		} catch {
+			// The pane has not started its persistent output process yet.
+		}
+
+		const scriptPath = Buffer.from(HERDR_RENDERER_PATH, "utf8").toString("base64");
+		const encodedSocketPath = Buffer.from(socketPath, "utf8").toString("base64");
+		const command = `node -e "require('node:child_process').spawnSync(process.execPath,[Buffer.from('${scriptPath}','base64').toString('utf8'),Buffer.from('${encodedSocketPath}','base64').toString('utf8')],{stdio:'inherit'})"`;
 		await this.#run(["pane", "run", paneId, command]);
+
+		const deadline = Date.now() + RENDERER_START_TIMEOUT_MS;
+		let lastError: unknown;
+		while (Date.now() < deadline) {
+			try {
+				await rendererRequest(socketPath, { type: "ping", id: randomUUID() }, RENDERER_REQUEST_TIMEOUT_MS);
+				return;
+			} catch (error) {
+				lastError = error;
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+		}
+		throw new Error(`Herdr pane renderer did not start for pane ${paneId}.`, { cause: lastError });
 	}
 }
 
@@ -156,6 +263,10 @@ export function herdrApiFromEnvironment(
 	};
 }
 
+const TOOL_ARGUMENT_LIMIT = 500;
+
+type AgentIdentity = { model?: ModelRef; thinking: string };
+
 function stringValue(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
@@ -165,84 +276,123 @@ function cleanText(text: string, limit = 240): string {
 	return cleaned.length > limit ? `${cleaned.slice(0, limit - 1)}…` : cleaned;
 }
 
-export function summarizeToolActivity(live: LiveState | undefined): string {
-	if (live === undefined) return "No tool activity";
-	const slots = [...(live.tools ?? []), ...(live.nestedTools ?? [])];
-	if (slots.length === 0) return live.run === undefined ? "No active tool calls" : "Waiting for model";
-	const summary = slots.slice(-8).map((slot) => `${slot.name} (${slot.status})`).join(", ");
-	return cleanText(summary);
+/** Keep readable line breaks while removing terminal control characters from conversation content. */
+function cleanTerminalText(text: string): string {
+	return text
+		.replace(/\r\n?/g, "\n")
+		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
 }
 
-export function herdrMetadataForAgent(name: string, initialThinking: string, view: ConversationView): HerdrMetadata {
+function modelLabel(model: ModelRef | undefined): string {
+	return model === undefined ? "no-model" : cleanText(`${model.provider}/${model.modelId}`, 120);
+}
+
+function identityFromView(view: ConversationView, fallback: AgentIdentity): AgentIdentity {
 	const agent = view.docs["pi.agent"] as AgentState | undefined;
-	const thinking = stringValue(agent?.thinkingLevel) ?? initialThinking;
-	const live = view.docs["pi.live"] as LiveState | undefined;
-	const activity = summarizeToolActivity(live);
-	const status = live?.run === undefined ? "idle" : "working";
 	return {
-		displayAgent: cleanText(name, 100),
-		title: cleanText(`${name} · ${thinking} · ${activity}`, 240),
-		tokens: {
-			thinking: cleanText(thinking, 32),
-			activity: status,
-			tools: activity,
-		},
+		model: agent?.model ?? fallback.model,
+		thinking: stringValue(agent?.thinkingLevel) ?? fallback.thinking,
 	};
 }
 
-function latestAssistantText(view: ConversationView): string {
-	for (let index = view.entries.length - 1; index >= 0; index--) {
-		const entry = view.entries[index];
+function sameModel(left: ModelRef | undefined, right: ModelRef | undefined): boolean {
+	return left?.provider === right?.provider && left?.modelId === right?.modelId;
+}
+
+export function herdrMetadataForAgent(name: string, model: ModelRef | undefined, thinking: string): HerdrMetadata {
+	const displayAgent = cleanText(name, 100);
+	const label = modelLabel(model);
+	const level = cleanText(thinking, 32);
+	return {
+		displayAgent,
+		title: cleanText(`${displayAgent} · ${label} · thinking ${level}`, 240),
+		tokens: { model: label, thinking: level },
+	};
+}
+
+export function herdrHeaderText(name: string, model: ModelRef | undefined, thinking: string): string {
+	return [
+		`Durable agent: ${cleanText(name, 100)}`,
+		`Model: ${modelLabel(model)}`,
+		`Thinking: ${cleanText(thinking, 32)}`,
+	].join("\n");
+}
+
+function userInputText(message: UserMessage | undefined): string {
+	if (message?.role !== "user") return "";
+	const content = typeof message.content === "string"
+		? message.content
+		: message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+	return cleanTerminalText(content);
+}
+
+function assistantResponseText(message: AssistantMessage | undefined): string {
+	if (message?.role !== "assistant") return "";
+	return cleanTerminalText(message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join(""));
+}
+
+function truncatedArguments(args: unknown): string {
+	let serialized: string;
+	try {
+		serialized = JSON.stringify(args) ?? "{}";
+	} catch {
+		serialized = "{}";
+	}
+	serialized = cleanTerminalText(serialized).replace(/\s+/g, " ");
+	return serialized.length > TOOL_ARGUMENT_LIMIT
+		? `${serialized.slice(0, TOOL_ARGUMENT_LIMIT - 1)}…`
+		: serialized;
+}
+
+function recordToolCalls(entries: ConversationView["entries"], calls: Map<string, ToolCall>): void {
+	for (const entry of entries) {
 		if (!AssistantEntry.is(entry)) continue;
 		const message = entry.model?.[0] as AssistantMessage | undefined;
-		const text = (message?.content ?? []).flatMap((part) => part.type === "text" ? [part.text] : []).join("").trim();
-		if (text !== "") return cleanText(text, 600);
+		for (const part of message?.content ?? []) {
+			if (part.type === "toolCall") calls.set(part.id, part);
+		}
 	}
-	return "Waiting for response";
 }
 
-function recentInputMessages(view: ConversationView): string[] {
-	const messages: string[] = [];
-	for (const entry of view.entries) {
-		if (!UserEntry.is(entry)) continue;
-		const message = entry.model?.[0] as { role?: string; content?: unknown } | undefined;
-		if (message?.role !== "user") continue;
-		const content = typeof message.content === "string"
-			? message.content
-			: Array.isArray(message.content)
-				? message.content.flatMap((part) => {
-					if (part === null || typeof part !== "object") return [];
-					const item = part as { type?: unknown; text?: unknown };
-					return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
-				}).join("")
-				: "";
-		const cleaned = cleanText(content, 500);
-		if (cleaned !== "") messages.push(cleaned);
+function appendEntryLine(entry: ConversationView["entries"][number], calls: Map<string, ToolCall>): string | undefined {
+	if (UserEntry.is(entry)) {
+		const message = entry.model?.[0] as UserMessage | undefined;
+		const text = userInputText(message);
+		return text.trim() === "" ? undefined : `[user input]\n${text}`;
 	}
-	return messages.slice(-3);
+	if (AssistantEntry.is(entry)) {
+		const message = entry.model?.[0] as AssistantMessage | undefined;
+		const text = assistantResponseText(message);
+		return text.trim() === "" ? undefined : `[assistant]\n${text}`;
+	}
+	if (ToolResultEntry.is(entry)) {
+		const result = entry.model?.[0] as ToolResultMessage | undefined;
+		if (result?.role !== "toolResult") return undefined;
+		const call = calls.get(result.toolCallId);
+		const name = cleanText(call?.name ?? result.toolName, 100);
+		const args = truncatedArguments(call?.arguments ?? {});
+		calls.delete(result.toolCallId);
+		return `[tool] ${name} ${args} — ${result.isError ? "failed" : "finished"}`;
+	}
+	return undefined;
 }
 
-export function herdrProgressText(name: string, initialThinking: string, view: ConversationView): string {
-	const metadata = herdrMetadataForAgent(name, initialThinking, view);
-	const inputs = recentInputMessages(view);
-	return [
-		`Durable agent: ${metadata.displayAgent}`,
-		`Status: ${metadata.tokens.activity}`,
-		`Thinking: ${metadata.tokens.thinking}`,
-		`Tools: ${metadata.tokens.tools}`,
-		"Recent inputs:",
-		...(inputs.length === 0 ? ["(none)"] : inputs.map((input, index) => `${index + 1}. ${input}`)),
-		`Latest response: ${latestAssistantText(view)}`,
-	].join("\n");
+function latestEntryId(view: ConversationView): EntryId | undefined {
+	return view.entries.at(-1)?.id ?? view.before;
 }
 
 type WatchedAgent = {
 	conversationId: ConversationId;
 	target: HerdrTarget;
 	watch: ConversationWatch;
-	initialThinking: string;
+	initialIdentity: AgentIdentity;
+	currentIdentity: AgentIdentity;
+	headerWritten: boolean;
+	outputVersionPersisted: boolean;
 	lastMetadata?: string;
-	lastProgress?: string;
+	lastEntryId?: EntryId;
+	toolCalls: Map<string, ToolCall>;
+	publishTail: Promise<void>;
 };
 
 export interface HerdrAgentMonitorOptions {
@@ -320,7 +470,7 @@ export class HerdrAgentMonitor {
 		if (this.#closed) return;
 		const tracked = this.#agents.get(name);
 		if (tracked?.conversationId === conversationId) {
-			if (await this.#ensurePane(name, tracked)) await this.#publish(name, tracked, tracked.watch.value);
+			if (await this.#ensurePane(name, tracked)) await this.#queuePublish(name, tracked, tracked.watch.value);
 			return;
 		}
 		const opening = this.#opening.get(name);
@@ -343,12 +493,14 @@ export class HerdrAgentMonitor {
 
 		const conversation = await this.#harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		if (conversation === undefined) throw new Error(`Managed agent "${name}" has no conversation.`);
-		const [agent, storedTarget] = await Promise.all([
+		const [agent, storedTarget, outputVersion] = await Promise.all([
 			conversation.agent(BACKGROUND_CONTEXT),
 			this.#service.herdrTarget(name),
+			this.#service.herdrOutputVersion(name),
 		]);
 		let target = storedTarget;
 		let targetNeedsPersist = false;
+		let createdPane = false;
 		if (storedTarget !== undefined) {
 			try {
 				target = await this.#api.getPane(storedTarget.paneId);
@@ -361,6 +513,7 @@ export class HerdrAgentMonitor {
 			const placement = this.#panePlacement(name);
 			target = await this.#api.createPane(this.#cwd, name, placement.anchorPaneId, placement.direction);
 			targetNeedsPersist = true;
+			createdPane = true;
 		} else if (this.#currentPane !== undefined) {
 			const placement = this.#panePlacement(name);
 			target = await this.#api.movePane(target.paneId, this.#currentPane.tabId, placement.anchorPaneId ?? this.#currentPane.paneId, name, placement.direction);
@@ -373,53 +526,76 @@ export class HerdrAgentMonitor {
 			await watch.stop();
 			return;
 		}
+		const initialIdentity: AgentIdentity = { model: agent.model, thinking: agent.thinkingLevel };
 		const watched: WatchedAgent = {
 			conversationId,
 			target,
 			watch,
-			initialThinking: agent.thinkingLevel,
+			initialIdentity,
+			currentIdentity: initialIdentity,
+			headerWritten: !createdPane && outputVersion === HERDR_OUTPUT_VERSION,
+			outputVersionPersisted: !createdPane && outputVersion === HERDR_OUTPUT_VERSION,
+			lastEntryId: createdPane ? watch.value.before : latestEntryId(watch.value),
+			toolCalls: new Map(),
+			publishTail: Promise.resolve(),
 		};
 		this.#agents.set(name, watched);
 		await this.#equalizeAgentPaneHeights(name);
-		await this.#publish(name, watched, watch.value);
+		await this.#queuePublish(name, watched, watch.value);
 		watch.start(async (call) => {
 			if (call.kind !== "value" || this.#closed) return;
-			await this.#publish(name, watched, call.value);
+			await this.#queuePublish(name, watched, call.value);
 		});
 	}
 
 	async #ensurePane(name: string, watched: WatchedAgent): Promise<boolean> {
 		let target: HerdrTarget | undefined;
+		let recreated = false;
 		try {
 			target = await this.#api.getPane(watched.target.paneId);
 		} catch {
 			try {
 				const placement = this.#panePlacement(name);
 				target = await this.#api.createPane(this.#cwd, name, placement.anchorPaneId, placement.direction);
+				recreated = true;
 			} catch (error) {
 				this.#onError(error, name);
 				return false;
 			}
 		}
 
-		if (target.tabId !== watched.target.tabId || target.paneId !== watched.target.paneId) {
+		if (recreated || target.paneId !== watched.target.paneId) {
 			watched.target = target;
 			watched.lastMetadata = undefined;
-			watched.lastProgress = undefined;
+			watched.headerWritten = false;
+			watched.outputVersionPersisted = false;
 			try {
 				await this.#service.setHerdrTarget(name, target);
 			} catch (error) {
 				this.#onError(error, name);
 			}
 			await this.#equalizeAgentPaneHeights(name);
+		} else if (target.tabId !== watched.target.tabId) {
+			watched.target = target;
+			try {
+				await this.#service.setHerdrTarget(name, target);
+			} catch (error) {
+				this.#onError(error, name);
+			}
 		}
 		return true;
 	}
 
+	#queuePublish(name: string, watched: WatchedAgent, view: ConversationView): Promise<void> {
+		const queued = watched.publishTail.then(() => this.#publish(name, watched, view));
+		watched.publishTail = queued.catch((error) => this.#onError(error, name));
+		return watched.publishTail;
+	}
+
 	async #publish(name: string, watched: WatchedAgent, view: ConversationView, allowRecovery = true): Promise<void> {
-		const metadata = herdrMetadataForAgent(name, watched.initialThinking, view);
-		const fingerprint = JSON.stringify(metadata);
 		let failed = false;
+		const metadata = herdrMetadataForAgent(name, watched.initialIdentity.model, watched.initialIdentity.thinking);
+		const fingerprint = JSON.stringify(metadata);
 		if (fingerprint !== watched.lastMetadata) {
 			try {
 				await this.#api.reportMetadata(watched.target.paneId, metadata);
@@ -429,13 +605,48 @@ export class HerdrAgentMonitor {
 			}
 		}
 
-		const progress = herdrProgressText(name, watched.initialThinking, view);
-		if (progress !== watched.lastProgress) {
+		const nextIdentity = identityFromView(view, watched.currentIdentity);
+		const nextToolCalls = new Map(watched.toolCalls);
+		recordToolCalls(view.entries, nextToolCalls);
+		const newEntries = view.entries.filter((entry) => watched.lastEntryId === undefined || entry.id > watched.lastEntryId);
+		const lines: string[] = [];
+		const writesHeader = !watched.headerWritten;
+		if (writesHeader) {
+			lines.push(herdrHeaderText(name, watched.currentIdentity.model, watched.currentIdentity.thinking));
+		}
+		if (!sameModel(nextIdentity.model, watched.currentIdentity.model)) {
+			lines.push(`[config] Model changed: ${modelLabel(nextIdentity.model)}`);
+		}
+		if (nextIdentity.thinking !== watched.currentIdentity.thinking) {
+			lines.push(`[config] Thinking level changed: ${cleanText(nextIdentity.thinking, 32)}`);
+		}
+		for (const entry of newEntries) {
+			const line = appendEntryLine(entry, nextToolCalls);
+			if (line !== undefined) lines.push(line);
+		}
+
+		let appendSucceeded = lines.length === 0;
+		if (lines.length > 0) {
 			try {
-				await this.#api.writeProgress(watched.target.paneId, progress);
-				watched.lastProgress = progress;
+				await this.#api.appendText(watched.target.paneId, lines.join("\n\n"));
+				appendSucceeded = true;
 			} catch {
 				failed = true;
+			}
+		}
+
+		if (appendSucceeded) {
+			if (writesHeader) watched.headerWritten = true;
+			watched.currentIdentity = nextIdentity;
+			watched.toolCalls = nextToolCalls;
+			watched.lastEntryId = newEntries.at(-1)?.id ?? watched.lastEntryId ?? view.before;
+		}
+		if (watched.headerWritten && !watched.outputVersionPersisted) {
+			try {
+				await this.#service.setHerdrOutputVersion(name, HERDR_OUTPUT_VERSION);
+				watched.outputVersionPersisted = true;
+			} catch (error) {
+				this.#onError(error, name);
 			}
 		}
 

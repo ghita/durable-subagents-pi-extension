@@ -21,6 +21,7 @@ import { loadPresetCatalog } from "./presets.ts";
 import { durableDatabasePath, requireSessionFile } from "./storage-path.ts";
 import { SubagentTasksExtension } from "./tasks.ts";
 import { deliverPiReport, hasPiReportEntry, type ReportEntryLike } from "./report-delivery.ts";
+import { ExtensionLogger } from "./logger.ts";
 
 export { durableDatabasePath, requireSessionFile } from "./storage-path.ts";
 
@@ -29,6 +30,7 @@ export interface ManagedSessionRuntime {
 	databasePath: string;
 	service: AgentService;
 	herdrMonitor?: HerdrAgentMonitor;
+	logger: ExtensionLogger;
 	close(): Promise<void>;
 }
 
@@ -45,7 +47,9 @@ function selectedThinking(pi: ExtensionAPI, context: ExtensionContext): ModelThi
 export async function openManagedSessionRuntime(
 	pi: ExtensionAPI,
 	context: ExtensionContext,
+	logger: ExtensionLogger,
 ): Promise<ManagedSessionRuntime> {
+	await logger.logDebug("runtime", "open_started");
 	const sessionFile = requireSessionFile(context.sessionManager.getSessionFile());
 	const databasePath = durableDatabasePath(sessionFile);
 	const cwd = context.cwd;
@@ -63,7 +67,7 @@ export async function openManagedSessionRuntime(
 			settings: { extensions: [CodingTools] },
 			env: (target) => new NodeExecutionEnv({ cwd: target.cwd ?? cwd }),
 			onReport: (report) => {
-				console.error(`[durable-subagents] ${report.kind}`, report.error);
+				void logger.logException("harness", `background_${report.kind}`, report.error);
 			},
 		},
 		BACKGROUND_CONTEXT,
@@ -96,14 +100,22 @@ export async function openManagedSessionRuntime(
 	const herdr = herdrApiFromEnvironment();
 	const herdrMonitor = herdr === undefined
 		? undefined
-		: new HerdrAgentMonitor({ api: herdr.api, currentPane: herdr.currentPane, cwd, harness, service });
+		: new HerdrAgentMonitor({
+			api: herdr.api,
+			currentPane: herdr.currentPane,
+			cwd,
+			harness,
+			service,
+			onError: (error) => { void logger.logException("herdr", "agent_update_failed", error); },
+		});
 	if (herdrMonitor !== undefined) {
 		try {
 			await herdrMonitor.attachPersistedAgents();
 		} catch (error) {
-			console.error("[durable-subagents] Could not restore Herdr agent tabs:", error);
+			await logger.logException("herdr", "restore_persisted_agents_failed", error);
 		}
 	}
+	await logger.logDebug("runtime", "opened");
 
 	let drainTail: Promise<void> = Promise.resolve();
 	let isClosed = false;
@@ -111,7 +123,9 @@ export async function openManagedSessionRuntime(
 		drainTail = drainTail
 			.then(async () => {
 				if (isClosed) return;
-				for (const report of await service.pendingReports()) {
+				const reports = await service.pendingReports();
+				if (reports.length > 0) await logger.logDebug("report-delivery", "pending_reports_found");
+				for (const report of reports) {
 					await deliverPiReport(
 						report,
 						{
@@ -127,9 +141,11 @@ export async function openManagedSessionRuntime(
 						},
 						(reportId) => service.markReportDelivered(reportId),
 					);
+					await logger.logDebug("report-delivery", "report_delivered");
 				}
 			})
-			.catch((error) => {
+			.catch(async (error) => {
+				await logger.logException("report-delivery", "drain_failed", error);
 				if (!isClosed) context.ui.notify(`Managed-agent report delivery failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			});
 	};
@@ -153,13 +169,17 @@ export async function openManagedSessionRuntime(
 		databasePath,
 		service,
 		herdrMonitor,
+		logger,
 		async close() {
 			if (isClosed) return;
 			isClosed = true;
+			await logger.logDebug("runtime", "closing");
 			observation.detach();
 			await herdrMonitor?.close();
 			await drainTail;
 			await harness.close(BACKGROUND_CONTEXT);
+			await logger.logDebug("runtime", "closed");
+			await logger.flush();
 		},
 	};
 }

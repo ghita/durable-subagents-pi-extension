@@ -39,7 +39,24 @@ The `subagent` tool supports `spawn`, `send`, `list`, `status`, `stop`, `stop-al
 
 When the extension runs in a Herdr-managed pane, each newly spawned agent gets its own non-focused split pane in the current Herdr tab. The first agent splits to the right of the main pane; each additional agent splits below the last agent within that right-side area. This preserves the main pane's width while stacking agents in rows instead of creating more thin columns, and the right-side rows are resized to equal heights as agents are added. Each pane is associated with its durable agent, so sending more work reuses it; the association is persisted with the managed-agent registry and restored when the Pi session resumes. Panes remain open after an agent finishes.
 
-The extension observes each Durable conversation and uses Herdr's supported CLI/API to update pane metadata and print concise status, thinking-level, tool-name/status, the three latest input messages (up to 500 characters each), and the latest assistant response (up to 600 characters) in the pane terminal. Tool arguments and results are not copied. Concurrent agents update separate panes. Existing managed-agent panes are reflowed into an equally sized right-side stack in the current tab when the session resumes; a pane closed during a session is recreated on the next agent update. The integration is enabled only when `HERDR_ENV=1` and `HERDR_WORKSPACE_ID` are present and the `herdr` CLI is available; failures are logged and do not stop agent work.
+Each pane gets an identity header with the agent name, configured model, and thinking level. Thereafter the terminal is append-only: full user inputs, every assistant text message (not thinking content), and completed tool calls with the tool name, compact arguments (up to 500 characters), and finished/failed status. Tool results are not copied. Changes to an inherited model or thinking level are appended as configuration lines; the original header is not rewritten. Existing panes resume without replaying old transcript entries; on the first update after this change, the new identity header is appended once and its format version is persisted. Newly created panes start with a header and currently visible entries. Concurrent agents append to separate panes. Each pane uses a persistent renderer over a private local socket, so the Node bootstrap command is run once per pane rather than echoed for every transcript update. Existing managed-agent panes are reflowed into an equally sized right-side stack in the current tab when the session resumes; a pane closed during a session is recreated on the next agent update. The integration is enabled only when `HERDR_ENV=1` and `HERDR_WORKSPACE_ID` are present and the `herdr` CLI is available; failures are logged and do not stop agent work.
+
+## Logging
+
+Operational exceptions caught by the extension at failure-handling boundaries are appended as readable text to `<Pi agent directory>/logs/durable-subagents.log` (by default `~/.pi/agent/logs/durable-subagents.log`). The file is shared across Pi sessions. Entries include a timestamp, component/event label, and exception details/stack trace. Set `PI_DURABLE_SUBAGENTS_LOG_LEVEL=debug` before starting Pi to also log selected runtime, agent-action, and report-delivery lifecycle events; unset or other values keep exception-only logging. Expected recovery/fallback errors are not necessarily logged, and the extension does not install process-wide exception handlers. Logging is best effort; a log-write failure falls back to `console.error`. Task messages, prompts, and reports are not intentionally logged.
+
+PowerShell:
+
+```powershell
+$env:PI_DURABLE_SUBAGENTS_LOG_LEVEL = "debug"
+pi
+```
+
+Bash:
+
+```sh
+PI_DURABLE_SUBAGENTS_LOG_LEVEL=debug pi
+```
 
 ## Presets
 
