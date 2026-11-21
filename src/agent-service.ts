@@ -159,7 +159,7 @@ function validateModelReference(registry: ModelRegistry, model: ModelRef, source
 		throw new Error(`${source} model "${model.provider}/${model.modelId}" is not present in Pi's model registry.`);
 	}
 	if (!registry.hasConfiguredAuth(resolved)) {
-		throw new Error(`${source} model "${model.provider}/${model.modelId}" is unavailable with the inherited Pi login.`);
+		throw new Error(`${source} model "${model.provider}/${model.modelId}" is unavailable with Pi's configured provider authentication.`);
 	}
 }
 

@@ -5,10 +5,11 @@ import { spawn } from "node:child_process";
 
 type SmokeResult = { provider?: string; model?: string; text?: string; error?: string };
 
-const directory = await mkdtemp(join(tmpdir(), "pi-durable-copilot-bridge-"));
+const directory = await mkdtemp(join(tmpdir(), "pi-durable-model-bridge-"));
 const resultPath = join(directory, "result.json");
-const extensionPath = resolve("test/copilot-smoke-extension.ts");
-const selectedModel = process.env.PI_DURABLE_COPILOT_MODEL ?? "github-copilot/gpt-6-luna";
+const extensionPath = resolve("test/model-bridge-smoke-extension.ts");
+const selectedModel = process.env.PI_DURABLE_MODEL?.trim();
+const modelArgs = selectedModel ? ["--model", selectedModel] : [];
 
 try {
 	const output = await new Promise<string>((resolveOutput, reject) => {
@@ -20,8 +21,7 @@ try {
 				"--extension",
 				extensionPath,
 				"--no-tools",
-				"--model",
-				selectedModel,
+				...modelArgs,
 				"--print",
 				"Reply with exactly: main turn ok.",
 			],
@@ -39,7 +39,7 @@ try {
 	});
 	const result = JSON.parse(await readFile(resultPath, "utf8")) as SmokeResult;
 	if (result.error !== undefined) throw new Error(result.error);
-	if (result.provider !== "github-copilot" || !result.text?.toLowerCase().includes("durable bridge ok")) {
+	if (result.provider === undefined || !result.text?.toLowerCase().includes("durable bridge ok")) {
 		throw new Error(`Unexpected bridge result: ${JSON.stringify(result)}\nPi output: ${output}`);
 	}
 	console.log(`Pi ModelRegistry bridge succeeded with ${result.provider}/${result.model}: ${result.text}`);

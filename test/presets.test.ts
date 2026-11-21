@@ -20,13 +20,13 @@ describe("agent presets", () => {
 	it("parses optional settings and preserves the Markdown instruction body", () => {
 		const preset = parseAgentPreset(
 			"researcher",
-			"---\ntools: [read, bash]\nmodel: github-copilot/gpt-6-luna\nthinking: high\n---\n\nBe concise and cite sources.\n",
+			"---\ntools: [read, bash]\nmodel: test-provider/test-model\nthinking: high\n---\n\nBe concise and cite sources.\n",
 		);
 
 		expect(preset).toEqual({
 			id: "researcher",
 			tools: ["read", "bash"],
-			model: { provider: "github-copilot", modelId: "gpt-6-luna" },
+			model: { provider: "test-provider", modelId: "test-model" },
 			thinking: "high",
 			instructions: "Be concise and cite sources.",
 		});

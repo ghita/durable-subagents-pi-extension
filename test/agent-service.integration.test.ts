@@ -207,7 +207,7 @@ describe("AgentService durable lifecycle", () => {
 		await expect(service.list()).resolves.toEqual([]);
 	});
 
-	it("rejects an explicit model that lacks the inherited Pi login", async () => {
+	it("rejects an explicit model without configured provider authentication", async () => {
 		const preset: AgentPreset = {
 			id: "no-login",
 			instructions: "Never fall back to another provider.",
@@ -220,7 +220,7 @@ describe("AgentService durable lifecycle", () => {
 		const { service, modelRegistry } = await setup([], 100_000, presets);
 		vi.spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(false);
 
-		await expect(service.spawn("no-login", undefined, "Try this preset.")).rejects.toThrow(/unavailable with the inherited Pi login/);
+		await expect(service.spawn("no-login", undefined, "Try this preset.")).rejects.toThrow(/unavailable with Pi's configured provider authentication/);
 		await expect(service.list()).resolves.toEqual([]);
 	});
 

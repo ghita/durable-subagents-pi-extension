@@ -37,8 +37,8 @@ import type {
 /**
  * The public Pi extension context exposes a ModelRegistry, not pi-ai's complete
  * Models implementation. This adapter forwards actual model requests to that
- * registry, so request-time auth (including the parent's Copilot OAuth login)
- * remains owned by Pi. It never reads or copies credential files.
+ * registry, so request-time provider authentication remains owned by Pi.
+ * It never reads or copies credential files.
  */
 export function createPiModelBridge(registry: ModelRegistry): Models {
 	const unsupported = (operation: string): Error =>

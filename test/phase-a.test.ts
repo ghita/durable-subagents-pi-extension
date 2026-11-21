@@ -13,7 +13,7 @@ import {
 
 const model = {
 	id: "test-model",
-	provider: "github-copilot",
+	provider: "test-provider",
 	api: "openai-responses",
 	baseUrl: "https://example.invalid",
 	name: "Test model",
@@ -28,7 +28,7 @@ const answer = {
 	role: "assistant",
 	content: [{ type: "text", text: "bridge works" }],
 	api: "openai-responses",
-	provider: "github-copilot",
+	provider: "test-provider",
 	model: model.id,
 	usage: { input: 1, output: 2, totalTokens: 3, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 	stopReason: "stop",
@@ -49,9 +49,9 @@ describe("Phase A model bridge", () => {
 
 		const bridge = createPiModelBridge(registry);
 
-		expect(bridge.getModel("github-copilot", model.id)).toBe(model);
+		expect(bridge.getModel("test-provider", model.id)).toBe(model);
 		await expect(bridge.completeSimple(model, requestContext, requestOptions)).resolves.toBe(answer);
-		expect(registry.find).toHaveBeenCalledWith("github-copilot", model.id);
+		expect(registry.find).toHaveBeenCalledWith("test-provider", model.id);
 		expect(registry.streamSimple).toHaveBeenCalledWith(model, requestContext, requestOptions);
 		expect(stream.result).toHaveBeenCalledOnce();
 	});

@@ -41,6 +41,6 @@ export function formatHelp(presets: PresetCatalog): string {
 		"/agents footer alwaysOn|activity",
 		`Cached presets: ${ids.length === 0 ? "(none)" : ids.join(", ")}`,
 		"Unconfigured agents receive read/write/edit/bash. Read-only behavior is only a prompt instruction, not a security boundary.",
-		"Durable agents require a persisted Pi session and use the parent's inherited Copilot login.",
+		"Durable agents require a persisted Pi session and use Pi's model registry and configured provider authentication.",
 	].join("\n");
 }

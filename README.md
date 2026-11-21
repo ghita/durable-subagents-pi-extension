@@ -6,7 +6,7 @@ A Pi extension for named, reusable background agents backed by `@earendil-works/
 
 - Pi `1.5.2` or compatible.
 - A persisted Pi session transcript. Temporary or transcript-less sessions cannot use durable agents.
-- A model available through Pi's configured Copilot login. The extension reuses Pi's `ModelRegistry`; it does not ask for or store a second credential.
+- A model available through Pi's `ModelRegistry` and configured provider authentication. The extension reuses Pi's model registry; it does not ask for or store a second credential.
 
 Load this package with Pi's extension/package mechanism, or for local development:
 
@@ -14,7 +14,7 @@ Load this package with Pi's extension/package mechanism, or for local developmen
 pi --extension ./src/index.ts
 ```
 
-Run checks with `npm test` and `npm run typecheck`. `npm run test:copilot` makes a real Copilot-authenticated model request; it requires a working Pi Copilot login and is not part of the offline test suite. Set `PI_DURABLE_COPILOT_MODEL` to choose another model.
+Run checks with `npm test` and `npm run typecheck`. The optional `npm run test:model-bridge` makes a real model request through Pi's configured provider authentication and is not part of the offline test suite. It uses Pi's configured default model, or you can set `PI_DURABLE_MODEL=provider/model` to choose one.
 
 ## Commands
 
@@ -71,16 +71,16 @@ The base directory comes from Pi's `getAgentDir()` configuration. Example:
 ```md
 ---
 tools: [read, bash]
-model: github-copilot/<model-id>
+model: <provider>/<model-id>
 thinking: high
 ---
 
 Search the project and return a concise summary with file references.
 ```
 
-`tools`, `model`, and `thinking` are optional. Supported durable-native tools are `read`, `write`, `edit`, and `bash`; an explicit tool list is an exact allowlist. If omitted, all four tools are available. Model values use `provider/model-id` and must resolve through Pi's model registry and configured login. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+`tools`, `model`, and `thinking` are optional. Supported durable-native tools are `read`, `write`, `edit`, and `bash`; an explicit tool list is an exact allowlist. If omitted, all four tools are available. Model values use `provider/model-id` and must resolve through Pi's model registry with provider authentication configured in Pi. A preset model is an explicit override; when omitted, the agent inherits the main agent's selected model and follows later changes. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
-Preset files are read and cached when the extension loads. Changes apply to new agents after Pi `/reload`; they do not rewrite existing agents. Malformed present presets, unsupported settings/tools, and unavailable configured models fail closed with an error. When model or thinking is omitted, the new agent inherits Pi's current selection and follows later model/thinking changes. Explicit preset values stay fixed.
+Preset files are read and cached when the extension loads. Changes apply to new agents after Pi `/reload`; they do not rewrite existing agents. Malformed present presets, unsupported settings/tools, and unavailable configured models fail closed with an error. Explicit preset values stay fixed for existing agents; inherited model and thinking settings follow later main-agent changes.
 
 ## Persistence and reports
 

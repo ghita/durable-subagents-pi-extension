@@ -35,7 +35,7 @@ Both entry points must call the same agent-management service so their behavior 
   ```md
   ---
   tools: [read, bash]
-  model: github-copilot/<model-id>
+  model: <provider>/<model-id>
   thinking: high
   ---
   Instructions for this kind of agent go here.
@@ -43,7 +43,7 @@ Both entry points must call the same agent-management service so their behavior 
 
   `tools`, `model`, and `thinking` are optional. Exact schema/parser is an implementation detail; validate it strictly.
 - A configured tool list is an exact subset of the durable-native coding tools. If `tools` is omitted, enable all durable-native coding tools. When applying an explicit list, configure the Durable agent's enabled tools and model-visible tools consistently so the model cannot call a tool outside the preset's list.
-- An unknown preset means an unconfigured agent and defaults to all durable-native coding tools. A present but malformed preset, an unsupported tool name, or an explicitly configured model unavailable through the inherited Copilot login must fail spawn with a clear error; do not silently broaden tools or fall back to another model.
+- An unknown preset means an unconfigured agent and defaults to all durable-native coding tools. A present but malformed preset, an unsupported tool name, or an explicitly configured model unavailable through Pi's configured provider authentication must fail spawn with a clear error; do not silently broaden tools or fall back to another model.
 - “Read-only” in v1 is a system-prompt instruction only. Bash may be included for `grep`/search, but it can also modify files; this is not a security boundary.
 
 ### Tools
@@ -54,8 +54,8 @@ Both entry points must call the same agent-management service so their behavior 
 
 ### Models and thinking
 
-- V1 uses the parent's inherited Copilot login; do not ask users to configure a second provider login.
-- The durable harness needs its own `Models` interface. Implement a small bridge to Pi's model registry/provider runtime so durable requests use the same configured Copilot credentials. Validate this early; do not build a parallel credential store.
+- V1 uses the parent's selected model and Pi's configured provider authentication; do not ask users to configure a second provider login.
+- The durable harness needs its own `Models` interface. Implement a small bridge to Pi's model registry/provider runtime so durable requests use Pi's configured credentials. Validate this early; do not build a parallel credential store.
 - Model references in presets use the provider/model IDs understood by durable. The user expects the main Pi model names to be compatible.
 - If a preset omits model or thinking, the agent inherits the current main Pi value and continues to follow subsequent main model/thinking changes. Explicit preset values stay fixed.
 - Durable conversations copy agent configuration at creation, so the extension must persist whether each agent inherits model/thinking and update only inherited agents on Pi `model_select` / `thinking_level_select` events. An already in-flight request completes with the model/level it started with; subsequent requests use the new inherited value.
@@ -110,7 +110,7 @@ The `subagent` Pi tool should support equivalent operations (`spawn`, `send`, `l
 2. Require `ctx.sessionManager.getSessionFile()` to be defined for durable mode.
 3. Derive a stable adjacent SQLite path from the transcript path; open it with `openNodeSqliteStorage` from `@earendil-works/pi-durable/storage/sqlite/node`.
 4. Construct the durable registry and install task/tool extensions on every open. Include durable-native coding tools.
-5. Build the model bridge around the current Pi model registry and inherited Copilot auth.
+5. Build the model bridge around the current Pi model registry and its configured provider authentication.
 6. Open the Harness, obtain the stable durable root conversation, and configure its `cwd`, currently selected model, and thinking level. The root is a durable control/ownership context; Pi remains the user-facing main conversation.
 7. Call `harness.resume()` so pending durable reporter and agent tasks continue after restart.
 8. On Pi model/thinking selection events, update the durable root and all managed agents marked as inherited. Do not touch explicit per-agent overrides.
@@ -159,8 +159,8 @@ Because the durable database and Pi transcript are separate stores, report deliv
 
 - Add the extension package manifest, TypeScript entry point, test runner, and required Pi/durable dependencies. The repository currently has no implementation scaffold.
 - Verify exact Pi extension APIs for commands, tool registration, session lifecycle, message injection, model/thinking events, and global agent-dir resolution.
-- Prototype the smallest `Models` bridge from Pi's `ModelRegistry` to the methods `pi-durable` uses (`getModel`, streaming, completion, and any deferred methods needed by the selected Copilot model). Test a real Copilot-authenticated request without copying credentials into a second store.
-- If that bridge cannot support the chosen Copilot model path safely, stop and report the concrete API gap before building the rest.
+- Prototype the smallest `Models` bridge from Pi's `ModelRegistry` to the methods `pi-durable` uses (`getModel`, streaming, completion, and any deferred methods needed by the selected model). Test a real request through Pi's configured provider authentication without copying credentials into a second store.
+- If that bridge cannot support the selected model path safely, stop and report the concrete API gap before building the rest.
 
 ### Phase B — Presets
 
@@ -196,8 +196,8 @@ Because the durable database and Pi transcript are separate stores, report deliv
 - Add unit tests for parser, path mapping, naming/collisions, preset lookup, validation, cost aggregation, output ordering, and counters.
 - Add durable integration tests with faux models and persistent SQLite for spawn/send/steer/stop-all/restart/report behavior.
 - Add Pi extension tests/mocks for slash command completion, natural-language tool routing, model/thinking change propagation, and session shutdown/reopen.
-- Manually test on a persistent Pi session with Copilot login: spawn configured and unconfigured agents, send/steer, stop one/all, inspect status/stats, change model/thinking, `/reload`, resume the transcript.
-- Document the preset format, global path, commands, read-only limitation, Copilot requirement, and deferred transcript-deletion cleanup.
+- Manually test on a persistent Pi session with a configured provider: spawn configured and unconfigured agents, send/steer, stop one/all, inspect status/stats, change model/thinking, `/reload`, resume the transcript.
+- Document the preset format, global path, commands, provider-neutral model inheritance and overrides, read-only limitation, and deferred transcript-deletion cleanup.
 
 ## 7. Acceptance criteria
 

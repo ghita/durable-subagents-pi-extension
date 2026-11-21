@@ -79,8 +79,8 @@ describe("Herdr CLI API adapter", () => {
 		await api.getPane("w1:p2");
 		await api.reportMetadata("w1:p2", {
 			displayAgent: "researcher",
-			title: "researcher · copilot/gpt-test · thinking high",
-			tokens: { model: "copilot/gpt-test", thinking: "high" },
+			title: "researcher · test-provider/test-model · thinking high",
+			tokens: { model: "test-provider/test-model", thinking: "high" },
 		});
 		const progress = "[assistant]\nI will inspect the project.";
 		await api.appendText("w1:p2", progress);
@@ -93,7 +93,7 @@ describe("Herdr CLI API adapter", () => {
 		expect(calls[2]).toEqual(["pane", "get", "w1:p2"]);
 		expect(calls[3]).toContain("--source");
 		expect(calls[3]).toContain("pi-durable-subagents");
-		expect(calls[3]).toContain("model=copilot/gpt-test");
+		expect(calls[3]).toContain("model=test-provider/test-model");
 		expect(calls[4]?.slice(0, 3)).toEqual(["pane", "run", "w1:p2"]);
 		expect(calls[4]?.[3]).not.toContain(progress);
 		expect(calls[4]?.[3]).not.toContain("\\x1b[3J\\x1b[2J\\x1b[H");
@@ -143,14 +143,14 @@ describe("Herdr CLI API adapter", () => {
 
 describe("Herdr append-only agent panes", () => {
 	it("formats a stable identity header and metadata with the configured model", () => {
-		const model = { provider: "copilot", modelId: "gpt-test" };
+		const model = { provider: "test-provider", modelId: "test-model" };
 		expect(herdrMetadataForAgent("researcher", model, "high")).toEqual<HerdrMetadata>({
 			displayAgent: "researcher",
-			title: "researcher · copilot/gpt-test · thinking high",
-			tokens: { model: "copilot/gpt-test", thinking: "high" },
+			title: "researcher · test-provider/test-model · thinking high",
+			tokens: { model: "test-provider/test-model", thinking: "high" },
 		});
 		expect(herdrHeaderText("researcher", model, "high"))
-			.toBe("Durable agent: researcher\nModel: copilot/gpt-test\nThinking: high");
+			.toBe("Durable agent: researcher\nModel: test-provider/test-model\nThinking: high");
 	});
 
 	it("appends full inputs and assistant text, completed tool calls, and config changes exactly once", async () => {
@@ -169,7 +169,7 @@ describe("Herdr append-only agent panes", () => {
 			entry("pi.assistant", 5, { role: "assistant", content: [{ type: "text", text: longResponse }] }),
 		];
 		const initialView = view({
-			"pi.agent": { model: { provider: "copilot", modelId: "gpt-test" }, thinkingLevel: "high" },
+			"pi.agent": { model: { provider: "test-provider", modelId: "test-model" }, thinkingLevel: "high" },
 		}, initialEntries);
 		let listener: ((call: any, context: any) => Promise<void>) | undefined;
 		const watch = {
@@ -179,7 +179,7 @@ describe("Herdr append-only agent panes", () => {
 			closed: Promise.resolve({ kind: "stopped" as const }),
 		} as unknown as ConversationWatch;
 		const conversation = {
-			agent: vi.fn(async () => ({ model: { provider: "copilot", modelId: "gpt-test" }, thinkingLevel: "high" })),
+			agent: vi.fn(async () => ({ model: { provider: "test-provider", modelId: "test-model" }, thinkingLevel: "high" })),
 			watch: vi.fn(async () => watch),
 		};
 		const target: HerdrTarget = { tabId: "w1:t3", paneId: "w1:p3" };
@@ -212,7 +212,7 @@ describe("Herdr append-only agent panes", () => {
 		expect(service.setHerdrTarget).toHaveBeenCalledWith("researcher", target);
 		expect(api.reportMetadata).toHaveBeenCalledOnce();
 		const firstAppend = appendText.mock.calls[0]?.[1] ?? "";
-		expect(firstAppend).toContain("Durable agent: researcher\nModel: copilot/gpt-test\nThinking: high");
+		expect(firstAppend).toContain("Durable agent: researcher\nModel: test-provider/test-model\nThinking: high");
 		expect(firstAppend).toContain(longInput);
 		expect(firstAppend).toContain("[assistant]\nI’ll inspect the files first.");
 		expect(firstAppend).toContain(longResponse);

@@ -5,17 +5,17 @@ import { createPiModelBridge } from "../src/model-bridge.ts";
 
 /**
  * Opt-in live smoke extension. Run with `PI_DURABLE_BRIDGE_RESULT=<path> pi ...`
- * so the request uses the host session's actual ModelRegistry and login.
+ * so the request uses the host session's actual ModelRegistry and provider authentication.
  */
-export default function copilotBridgeSmoke(pi: ExtensionAPI): void {
+export default function modelBridgeSmoke(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		const resultPath = process.env.PI_DURABLE_BRIDGE_RESULT;
 		if (resultPath === undefined) return;
 
 		try {
 			const model = ctx.model as Model<any> | undefined;
-			if (model === undefined || model.provider !== "github-copilot") {
-				throw new Error(`Expected a selected github-copilot model, got ${model?.provider ?? "no model"}`);
+			if (model === undefined) {
+				throw new Error("Pi has no selected model for the model bridge smoke test.");
 			}
 			const response = await createPiModelBridge(ctx.modelRegistry).completeSimple(
 				model,
