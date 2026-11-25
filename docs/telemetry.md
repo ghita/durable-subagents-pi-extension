@@ -93,10 +93,11 @@ The extension passes the telemetry context into Durable and records managed-agen
 
 - `durable_subagents.request` — accepted `spawn` or `send`, including the operation, agent name, and task text.
 - `durable_subagents.execution` — the child submission and its outcome.
-- `pi.durable.*` — spans emitted by Durable for its internal task and model workflow.
+- `pi.durable.submit` — a Durable-owned span for `Conversation.submit()` admission. In this extension it is emitted when `AgentReporter` calls `child.submit()` in `src/tasks.ts`. For input/continue submissions, Durable starts it as a root trace and links it to the caller; it covers admission, not completion of the child run.
+- `pi.durable.phase` — Durable-owned task phase spans; other `pi.durable.*` spans are also emitted by Durable.
 - `durable_subagents.report.delivery` — report delivery and acknowledgement, correlated to the originating execution.
 
-The execution span has events for user messages, assistant text responses, tool calls and results, report creation, and failed or unanswered execution. **Tool calls and results are span events, not separate span nodes.** When inspecting a trace in Phoenix, select the execution span and inspect its events. Report delivery uses the trace context persisted with the report.
+The execution span has events for user messages, assistant text responses, tool calls and results, report creation, and failed or unanswered execution. **Tool calls and results are span events, not separate span nodes.** When inspecting a trace in Phoenix, select the execution span and inspect its events. Durable's `pi.durable.submit` may appear as a separate root trace with a link to the caller rather than as a child span. Report delivery uses the trace context persisted with the report.
 
 The HTTP trace and metric exporters use OTLP/protobuf; the gRPC exporters use OTLP/gRPC. The metric pipeline is configured alongside tracing. The extension's diagnostics are primarily traces; it does not currently define a catalog of extension-specific counters or histograms. Metrics appear when an instrumented component records measurements through the shared telemetry context.
 
