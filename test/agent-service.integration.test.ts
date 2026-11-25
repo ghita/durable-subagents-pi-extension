@@ -88,6 +88,41 @@ async function setup(
 }
 
 describe("AgentService durable lifecycle", () => {
+	it("captures request-local tool activity when a child submission ends unanswered", async () => {
+		const telemetry = new InMemoryTelemetryContext();
+		const { service, harness, faux, directory } = await setup([], 100_000, { entries: new Map(), valid: new Map() }, telemetry);
+		const file = join(directory, "partial-tool-output.txt");
+		await writeFile(file, "tool output before model failure", "utf8");
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: file }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("synthetic provider failure", { stopReason: "error", errorMessage: "synthetic provider failure" }),
+		]);
+
+		const spawned = await service.spawn("failing-worker", undefined, "Read the file, then summarize it.");
+		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+
+		const executionSpan = telemetry.getSpans().find((span) =>
+			span.name === "durable_subagents.execution"
+			&& span.attributes["managed_agent.task.text"] === "Read the file, then summarize it.",
+		);
+		const events = executionSpan?.events ?? [];
+		expect(events.map((event) => event.name)).toEqual([
+			"managed_agent.user_message",
+			"managed_agent.tool_call",
+			"managed_agent.tool_result",
+			"managed_agent.assistant_response",
+			"managed_agent.execution_unanswered",
+			"managed_agent.report_created",
+		]);
+		expect(events.find((event) => event.name === "managed_agent.execution_unanswered")?.attributes[
+			"managed_agent.execution.reason"
+		]).toBe("model_error");
+		expect(events.find((event) => event.name === "managed_agent.tool_result")?.attributes["tool.output"])
+			.toContain("tool output before model failure");
+		expect(events.find((event) => event.name === "managed_agent.report_created")?.attributes["managed_agent.report.text"])
+			.toContain("ended without an answer (model_error)");
+	});
+
 	it("correlates managed requests with child model/tool payloads and report creation", async () => {
 		const telemetry = new InMemoryTelemetryContext();
 		const { service, harness, faux, directory } = await setup([], 100_000, { entries: new Map(), valid: new Map() }, telemetry);

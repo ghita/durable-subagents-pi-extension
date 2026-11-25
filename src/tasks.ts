@@ -7,6 +7,7 @@ import {
 	type ConversationId,
 	type ContextView,
 	type EntryId,
+	type SettledSubmissionRecord,
 	type TaskId,
 } from "@earendil-works/pi-durable";
 import { SubagentsDoc } from "./agent-state.ts";
@@ -54,10 +55,12 @@ function textContent(value: { content?: unknown } | undefined): string {
 	).join("");
 }
 
-function entriesForSubmission(view: ContextView, inputEntryId: EntryId, answerEntryId: EntryId): ContextView["entries"] {
+function entriesForSubmission(view: ContextView, inputEntryId: EntryId, answerEntryId?: EntryId): ContextView["entries"] {
 	const entries = view.entries;
 	const start = entries.findIndex((entry) => entry.id === inputEntryId);
-	const answer = entries.findIndex((entry) => entry.id === answerEntryId);
+	const answer = answerEntryId === undefined
+		? entries.length - 1
+		: entries.findIndex((entry) => entry.id === answerEntryId);
 	if (start < 0 || answer < start) return [];
 
 	// A run may answer several steered submissions together. Assign each transcript segment to the
@@ -72,7 +75,7 @@ function captureConversationContent(
 	span: TelemetrySpan | undefined,
 	view: ContextView,
 	inputEntryId: EntryId,
-	answerEntryId: EntryId,
+	answerEntryId?: EntryId,
 ): void {
 	if (span === undefined) return;
 	const calls = new Map<string, ToolCall>();
@@ -124,6 +127,20 @@ function captureConversationContent(
 	}
 }
 
+async function captureSubmissionContentBestEffort(
+	span: TelemetrySpan | undefined,
+	inputEntryId: EntryId | undefined,
+	answerEntryId: EntryId | undefined,
+	readView: () => Promise<ContextView>,
+): Promise<void> {
+	if (span === undefined || inputEntryId === undefined) return;
+	try {
+		captureConversationContent(span, await readView(), inputEntryId, answerEntryId);
+	} catch {
+		// Transcript inspection is diagnostic-only; it must not change agent or report behavior.
+	}
+}
+
 /** Each child conversation is owned by a short-lived background anchor. */
 export const AgentAnchor = defineTask<null, { phase: "done" }, null>({
 	name: "app.durable-subagents.anchor",
@@ -164,10 +181,49 @@ export const AgentReporter = defineTask<ReporterInput, ReporterState, null>({
 						{ type: "input", content: message, whenBusy: "steer", requestId },
 						executionContext,
 					);
-					const settled = await submission.wait(executionContext);
+					let settled: SettledSubmissionRecord;
+					try {
+						settled = await submission.wait(executionContext);
+					} catch (error) {
+						// A failed wait can still leave useful, committed transcript activity behind.
+						// Capture it best-effort, without replacing the original failure.
+						try {
+							const status = await submission.status(executionContext);
+							if (status.type === "input") {
+								const answerEntryId = status.status === "done" ? status.answer : undefined;
+								await captureSubmissionContentBestEffort(
+									span,
+									status.entry,
+									answerEntryId,
+									() => runtime.context(
+										conversationId,
+										executionContext,
+										answerEntryId === undefined ? {} : { at: answerEntryId },
+									),
+								);
+							}
+						} catch {
+							// A failed status read must not replace the original submission failure.
+						}
+						safeAddEvent(span, "managed_agent.execution_failed", {
+							"error.type": error instanceof Error ? error.name : typeof error,
+						});
+						throw error;
+					}
 					let reportText: string | undefined;
 
 					if (settled.status === "unanswered") {
+						if (settled.type === "input") {
+							await captureSubmissionContentBestEffort(
+								span,
+								settled.entry,
+								undefined,
+								() => runtime.context(conversationId, executionContext),
+							);
+						}
+						safeAddEvent(span, "managed_agent.execution_unanswered", {
+							"managed_agent.execution.reason": settled.reason,
+						});
 						// Stop removes the current request without creating an outgoing report.
 						if (settled.reason !== "aborted") reportText = `The request ended without an answer (${settled.reason}).`;
 					} else if (settled.type === "input") {
