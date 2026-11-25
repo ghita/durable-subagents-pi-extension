@@ -99,6 +99,29 @@ The extension passes the telemetry context into Durable and records managed-agen
 
 The execution span has events for user messages, assistant text responses, tool calls and results, report creation, and failed or unanswered execution. **Tool calls and results are span events, not separate span nodes.** When inspecting a trace in Phoenix, select the execution span and inspect its events. Durable's `pi.durable.submit` may appear as a separate root trace with a link to the caller rather than as a child span. Report delivery uses the trace context persisted with the report.
 
+### AgentReporter task lifecycle
+
+`AgentReporter` is a root-owned Durable background task. Its single `deliver` phase is the **orchestrator** for one managed-agent submission; it is not the child agent's conversation. The phase retrieves the child conversation, submits the task input, and waits while Durable runs the child conversation's model turns and tools. The `durable_subagents.execution` span surrounds that whole wait.
+
+```text
+Trace A — parent/child tree
+AgentService.spawn/send
+└── durable_subagents.request                 accepted task
+    └── pi.durable.phase                      AgentReporter.deliver phase
+        └── durable_subagents.execution       open while child works
+            ├── child.submit() + submission.wait()
+            │   └── child conversation         model turns and tool calls/results
+            ├── capture current submission    transcript entries become span events
+            ├── report_created + trace context persisted
+            └── durable_subagents.report.delivery
+                (later child span; send + acknowledge)
+
+Trace B — linked admission span
+pi.durable.submit [root] ── link ──> durable_subagents.execution
+```
+
+`child.submit()` only admits the input (it may queue or steer it when the child is busy); Durable reports that admission in `pi.durable.submit`, a separate root span linked to the execution. It does not wait for an answer. `submission.wait()` waits for that submission to settle while the child conversation runs. Afterward, `AgentReporter` reads the child's committed transcript and records the current submission's user messages, assistant text, tool calls/results, and outcome as events on `durable_subagents.execution`. On failed or unanswered runs, it attempts best-effort capture of any committed activity. It then persists the report with the execution span's trace context, allowing the host runtime to create `durable_subagents.report.delivery` later as a child of the execution span.
+
 The HTTP trace and metric exporters use OTLP/protobuf; the gRPC exporters use OTLP/gRPC. The metric pipeline is configured alongside tracing. The extension's diagnostics are primarily traces; it does not currently define a catalog of extension-specific counters or histograms. Metrics appear when an instrumented component records measurements through the shared telemetry context.
 
 ## Payload and privacy behavior

@@ -154,7 +154,11 @@ export const AgentAnchor = defineTask<null, { phase: "done" }, null>({
 		runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
 });
 
-/** Durable delivery into a child, followed by a persisted report mailbox entry for the Pi host adapter. */
+/**
+ * Root-owned background task that submits work to a child conversation and waits for that submission to settle.
+ * Its `deliver` phase captures request-local transcript activity, persists a report with trace context, and leaves
+ * delivery to the Pi host adapter.
+ */
 export const AgentReporter = defineTask<ReporterInput, ReporterState, null>({
 	name: "app.durable-subagents.reporter",
 	version: 1,
