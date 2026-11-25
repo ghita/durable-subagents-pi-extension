@@ -1,8 +1,32 @@
 import { createServer } from "node:http";
+import otlpProto from "@opentelemetry/otlp-transformer/build/src/generated/root.js";
 import { InMemoryTelemetryContext } from "@earendil-works/pi-telemetry";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deliverPiReportWithTelemetry } from "../src/report-delivery.ts";
 import { cappedContentAttributes, capContent, createOptInTelemetry, inTelemetrySpan, MAX_PAYLOAD_BYTES } from "../src/telemetry.ts";
+
+interface ProtoRequestDecoder<T> {
+	decode(data: Uint8Array): T;
+}
+
+interface DecodedTraceRequest {
+	resourceSpans?: Array<{ scopeSpans?: Array<{ spans?: Array<{ name?: string }> }> }>;
+}
+
+interface DecodedMetricsRequest {
+	resourceMetrics?: Array<{ scopeMetrics?: Array<{ metrics?: Array<{ name?: string }> }> }>;
+}
+
+const protoRoot = otlpProto as unknown as {
+	opentelemetry: {
+		proto: {
+			collector: {
+				trace: { v1: { ExportTraceServiceRequest: ProtoRequestDecoder<DecodedTraceRequest> } };
+				metrics: { v1: { ExportMetricsServiceRequest: ProtoRequestDecoder<DecodedMetricsRequest> } };
+			};
+		};
+	};
+};
 
 const openTelemetryAdapters: Array<{ close(): Promise<void> }> = [];
 afterEach(async () => {
@@ -84,12 +108,22 @@ describe("opt-in OpenTelemetry", () => {
 	});
 
 	it("exports correlated traces and metrics through configured OTLP/HTTP settings", async () => {
-		const requests: Array<{ path: string; header: string | undefined; bodySize: number }> = [];
+		const requests: Array<{
+			path: string;
+			header: string | undefined;
+			contentType: string | undefined;
+			body: Buffer;
+		}> = [];
 		const server = createServer((request, response) => {
-			let bodySize = 0;
-			request.on("data", (chunk: Buffer) => { bodySize += chunk.byteLength; });
+			const chunks: Buffer[] = [];
+			request.on("data", (chunk: Buffer) => { chunks.push(Buffer.from(chunk)); });
 			request.on("end", () => {
-				requests.push({ path: request.url ?? "", header: request.headers["x-test-header"] as string | undefined, bodySize });
+				requests.push({
+					path: request.url ?? "",
+					header: request.headers["x-test-header"] as string | undefined,
+					contentType: request.headers["content-type"],
+					body: Buffer.concat(chunks),
+				});
 				response.writeHead(200, { "content-type": "application/x-protobuf" }).end();
 			});
 		});
@@ -118,7 +152,23 @@ describe("opt-in OpenTelemetry", () => {
 			expect(paths).toContain("/v1/metrics");
 			expect(paths.every((path) => path === "/v1/traces" || path === "/v1/metrics")).toBe(true);
 			expect(requests.every(({ header }) => header === "collector token")).toBe(true);
-			expect(requests.every(({ bodySize }) => bodySize > 0)).toBe(true);
+			expect(requests.every(({ body }) => body.byteLength > 0)).toBe(true);
+
+			const traceRequest = requests.find(({ path }) => path === "/v1/traces");
+			expect(traceRequest?.contentType).toBe("application/x-protobuf");
+			const tracePayload = protoRoot.opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest.decode(traceRequest!.body);
+			const spanNames = tracePayload.resourceSpans?.flatMap((resource) =>
+				resource.scopeSpans?.flatMap((scope) => scope.spans?.map((span) => span.name) ?? []) ?? [],
+			) ?? [];
+			expect(spanNames).toContain("managed_agent.test");
+
+			const metricRequest = requests.find(({ path }) => path === "/v1/metrics");
+			expect(metricRequest?.contentType).toBe("application/x-protobuf");
+			const metricPayload = protoRoot.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest.decode(metricRequest!.body);
+			const metricNames = metricPayload.resourceMetrics?.flatMap((resource) =>
+				resource.scopeMetrics?.flatMap((scope) => scope.metrics?.map((metric) => metric.name) ?? []) ?? [],
+			) ?? [];
+			expect(metricNames).toContain("managed_agent.test.count");
 			expect(warn).not.toHaveBeenCalled();
 		} finally {
 			await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

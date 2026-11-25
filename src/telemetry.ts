@@ -13,9 +13,9 @@ import {
 } from "@opentelemetry/api";
 import { TraceState } from "@opentelemetry/core";
 import { OTLPMetricExporter as GrpcMetricExporter } from "@opentelemetry/exporter-metrics-otlp-grpc";
-import { OTLPMetricExporter as HttpMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { OTLPMetricExporter as HttpProtobufMetricExporter } from "@opentelemetry/exporter-metrics-otlp-proto";
 import { OTLPTraceExporter as GrpcTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
-import { OTLPTraceExporter as HttpTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPTraceExporter as HttpProtobufTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { Resource } from "@opentelemetry/resources";
 import { BasicTracerProvider, BatchSpanProcessor, type SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { MeterProvider, PeriodicExportingMetricReader, type PushMetricExporter } from "@opentelemetry/sdk-metrics";
@@ -355,7 +355,7 @@ export function createOptInTelemetry(
 	}
 
 	let traceExporter: SpanExporter | undefined;
-	let metricExporter: InstanceType<typeof HttpMetricExporter> | InstanceType<typeof GrpcMetricExporter> | undefined;
+	let metricExporter: InstanceType<typeof HttpProtobufMetricExporter> | InstanceType<typeof GrpcMetricExporter> | undefined;
 	try {
 		const traceOptions = exporterOptions(environment, endpoint, "traces", protocol);
 		const metricOptions = exporterOptions(environment, endpoint, "metrics", protocol);
@@ -363,8 +363,8 @@ export function createOptInTelemetry(
 			traceExporter = new GrpcTraceExporter(traceOptions);
 			metricExporter = new GrpcMetricExporter(metricOptions);
 		} else {
-			traceExporter = new HttpTraceExporter(traceOptions);
-			metricExporter = new HttpMetricExporter(metricOptions);
+			traceExporter = new HttpProtobufTraceExporter(traceOptions);
+			metricExporter = new HttpProtobufMetricExporter(metricOptions);
 		}
 
 		const resource = new Resource(resourceAttributes(environment));
