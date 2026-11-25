@@ -1,3 +1,6 @@
+import type { TelemetryContext } from "@earendil-works/pi-telemetry";
+import { cappedContentAttributes, extractTelemetryContext, inTelemetrySpan, safeAddEvent } from "./telemetry.ts";
+
 export const SUBAGENT_REPORT_TYPE = "durable-subagent-report";
 
 export interface ReportEntryLike {
@@ -30,6 +33,7 @@ export interface ManagedReport {
 	id: string;
 	agentName: string;
 	text: string;
+	traceContext?: Record<string, string> | null;
 }
 
 export function hasPiReportEntry(entries: readonly ReportEntryLike[], reportId: string): boolean {
@@ -75,4 +79,33 @@ export async function deliverPiReport(
 
 	await acknowledge(report.id);
 	return { deliveredNow: !alreadyInTranscript, acknowledged: true };
+}
+
+/** Deliver and acknowledge a report in the request's trace, without making telemetry part of delivery correctness. */
+export async function deliverPiReportWithTelemetry(
+	report: ManagedReport,
+	telemetry: TelemetryContext | undefined,
+	transport: PiReportTransport,
+	acknowledge: (reportId: string) => Promise<void>,
+): Promise<{ deliveredNow: boolean; acknowledged: boolean }> {
+	const parent = extractTelemetryContext(telemetry, report.traceContext ?? undefined);
+	return inTelemetrySpan(
+		parent,
+		{
+			name: "durable_subagents.report.delivery",
+			attributes: {
+				"managed_agent.name": report.agentName,
+				"managed_agent.report.id": report.id,
+				...cappedContentAttributes("managed_agent.report.text", report.text),
+			},
+		},
+		async (span) => {
+			safeAddEvent(span, "managed_agent.report.delivery_started", { "managed_agent.report.id": report.id });
+			const result = await deliverPiReport(report, transport, acknowledge);
+			if (result.acknowledged) {
+				safeAddEvent(span, "managed_agent.report.delivery_completed", { "managed_agent.report.id": report.id });
+			}
+			return result;
+		},
+	);
 }

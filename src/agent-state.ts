@@ -26,6 +26,7 @@ export interface ManagedReportRecord extends JsonObject {
 	id: string;
 	agentName: string;
 	text: string;
+	traceContext: Record<string, string> | null;
 	delivered: boolean;
 }
 

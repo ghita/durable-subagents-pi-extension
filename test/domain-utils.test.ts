@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { aggregateUsage, orderStatsRows } from "../src/agent-service.ts";
 import { parseAgentsCommand } from "../src/command-parser.ts";
@@ -15,8 +16,9 @@ const usage = (input: number, output: number, cost: number) => ({
 
 describe("durable subagent domain helpers", () => {
 	it("derives a deterministic adjacent sidecar from a persisted transcript", () => {
-		expect(durableDatabasePath("C:/sessions/work/session-abc.jsonl")).toBe("C:\\sessions\\work\\session-abc.durable.sqlite");
-		expect(durableDatabasePath("C:/sessions/work/pi-session")).toBe("C:\\sessions\\work\\pi-session.durable.sqlite");
+		const directory = resolve("sessions", "work");
+		expect(durableDatabasePath(resolve(directory, "session-abc.jsonl"))).toBe(resolve(directory, "session-abc.durable.sqlite"));
+		expect(durableDatabasePath(resolve(directory, "pi-session"))).toBe(resolve(directory, "pi-session.durable.sqlite"));
 	});
 
 	it("requires a persisted Pi session instead of falling back to temporary storage", () => {

@@ -47,6 +47,31 @@ async function closeChild(child: ChildProcessWithoutNullStreams | undefined): Pr
 	await exited;
 }
 
+async function waitForChildOutput(
+	child: ChildProcessWithoutNullStreams,
+	getOutput: () => string,
+	minimumLength: number,
+): Promise<void> {
+	if (getOutput().length >= minimumLength) return;
+	await new Promise<void>((resolve, reject) => {
+		const finish = (error?: Error) => {
+			clearTimeout(timeout);
+			child.stdout.removeListener("data", onData);
+			child.removeListener("exit", onExit);
+			if (error === undefined) resolve();
+			else reject(error);
+		};
+		const onData = () => {
+			if (getOutput().length >= minimumLength) finish();
+		};
+		const onExit = () => finish(new Error("Herdr pane renderer exited before all output was received."));
+		const timeout = setTimeout(() => finish(new Error("Timed out waiting for Herdr pane output.")), 1_000);
+		child.stdout.on("data", onData);
+		child.once("exit", onExit);
+		onData();
+	});
+}
+
 describe("Herdr CLI API adapter", () => {
 	it("splits the current tab and reports pane metadata through the supported CLI API", async () => {
 		const calls: string[][] = [];
@@ -106,6 +131,7 @@ describe("Herdr CLI API adapter", () => {
 
 	it("uses one persistent pane process to transport long append-only output off the command line", async () => {
 		const payload = "Long assistant response. ".repeat(2_000);
+		const expectedRendered = `${payload}\nsecond update\n`;
 		let command = "";
 		let renderer: ChildProcessWithoutNullStreams | undefined;
 		let rendered = "";
@@ -130,7 +156,9 @@ describe("Herdr CLI API adapter", () => {
 		expect(paneRuns).toHaveLength(1);
 		expect(command.length).toBeLessThan(500);
 		expect(command).not.toContain(payload);
-		expect(rendered).toBe(`${payload}\nsecond update\n`);
+		if (renderer === undefined) throw new Error("Herdr pane renderer was not started.");
+		await waitForChildOutput(renderer, () => rendered, expectedRendered.length);
+		expect(rendered).toBe(expectedRendered);
 		await closeChild(renderer);
 	});
 

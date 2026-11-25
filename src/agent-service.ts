@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, withTelemetry } from "@earendil-works/chord/context";
+import type { TelemetryContext } from "@earendil-works/pi-telemetry";
 import {
 	AssistantEntry,
 	configure,
@@ -22,6 +23,7 @@ import { getPresetOrFallback, type AgentPreset, type PresetCatalog } from "./pre
 import { uniqueAgentName, validateAgentName } from "./names.ts";
 import { SubagentsDoc, type ManagedAgentRecord, type ManagedReportRecord, type SubagentsState } from "./agent-state.ts";
 import { AgentReporter, AgentAnchor } from "./tasks.ts";
+import { cappedContentAttributes, inTelemetrySpan } from "./telemetry.ts";
 
 export interface AgentSummary {
 	name: string;
@@ -95,6 +97,7 @@ export interface AgentServiceOptions {
 	modelRegistry: ModelRegistry;
 	parentModel: ModelRef;
 	parentThinking: ModelThinkingLevel;
+	telemetry?: TelemetryContext;
 }
 
 function emptyUsage(): UsageTotals {
@@ -171,6 +174,7 @@ export class AgentService {
 	readonly #modelRegistry: ModelRegistry;
 	#parentModel: ModelRef;
 	#parentThinking: ModelThinkingLevel;
+	#telemetry?: TelemetryContext;
 	#footerHistory = new Map<ConversationId, AgentHistoryCounts>();
 
 	constructor(options: AgentServiceOptions) {
@@ -181,6 +185,7 @@ export class AgentService {
 		this.#modelRegistry = options.modelRegistry;
 		this.#parentModel = options.parentModel;
 		this.#parentThinking = options.parentThinking;
+		this.#telemetry = options.telemetry;
 	}
 
 	async #state(): Promise<SubagentsState> {
@@ -199,49 +204,64 @@ export class AgentService {
 		const selectedTools = toolRegistrations(preset?.tools);
 		const operationId = randomUUID();
 
-		return this.root.commit(async (tx) => {
-			const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
-			const name = uniqueAgentName(baseName, state.agents);
-			const anchorTaskId = await tx.createTask(AgentAnchor, null, {
-				ownership: { kind: "conversation" },
-				background: true,
-			});
-			const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchorTaskId } });
-			await configure(tx, child.id, {
-				extensions: [CodingTools],
-				model,
-				thinkingLevel,
-				instructions: `${preset?.instructions ?? ""}${preset === undefined ? "" : "\n\n"}You are the managed agent named "${name}". Follow the task from the main Pi agent and return a useful report.`,
-				cwd: this.cwd,
-				...(selectedTools === undefined ? {} : { tools: selectedTools, modelTools: selectedTools }),
-			});
+		return inTelemetrySpan(
+			this.#telemetry,
+			{
+				name: "durable_subagents.request",
+				attributes: {
+					"managed_agent.operation": "spawn",
+					"managed_agent.name": baseName,
+					...cappedContentAttributes("managed_agent.task.text", message),
+				},
+			},
+			(span) => {
+				const context = span === undefined ? BACKGROUND_CONTEXT : withTelemetry(span, BACKGROUND_CONTEXT);
+				return this.root.commit(async (tx) => {
+					const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
+					const name = uniqueAgentName(baseName, state.agents);
+					const anchorTaskId = await tx.createTask(AgentAnchor, null, {
+						ownership: { kind: "conversation" },
+						background: true,
+					});
+					const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchorTaskId } });
+					await configure(tx, child.id, {
+						extensions: [CodingTools],
+						model,
+						thinkingLevel,
+						instructions: `${preset?.instructions ?? ""}${preset === undefined ? "" : "\n\n"}You are the managed agent named "${name}". Follow the task from the main Pi agent and return a useful report.`,
+						cwd: this.cwd,
+						...(selectedTools === undefined ? {} : { tools: selectedTools, modelTools: selectedTools }),
+					});
 
-			const reporterInput = {
-				agentName: name,
-				conversationId: child.id,
-				message: messageFor(name, message),
-				requestId: `managed-agent:${operationId}`,
-				reportId: operationId,
-			};
-			const reporterTaskId = await tx.createTask(AgentReporter, reporterInput, {
-				ownership: { kind: "conversation" },
-				background: true,
-			});
-			state.agents[name] = {
-				conversationId: child.id,
-				presetId,
-				herdrTarget: null,
-				herdrOutputVersion: null,
-				inheritModel: preset?.model === undefined,
-				inheritThinking: preset?.thinking === undefined,
-				incomingCount: 1,
-				outgoingCount: 0,
-				latestTask: message,
-				fresh: true,
-				reporterTaskIds: [reporterTaskId],
-			};
-			return { name, conversationId: child.id, reporterTaskId };
-		}, BACKGROUND_CONTEXT);
+					const reporterInput = {
+						agentName: name,
+						conversationId: child.id,
+						message: messageFor(name, message),
+						taskText: message,
+						requestId: `managed-agent:${operationId}`,
+						reportId: operationId,
+					};
+					const reporterTaskId = await tx.createTask(AgentReporter, reporterInput, {
+						ownership: { kind: "conversation" },
+						background: true,
+					});
+					state.agents[name] = {
+						conversationId: child.id,
+						presetId,
+						herdrTarget: null,
+						herdrOutputVersion: null,
+						inheritModel: preset?.model === undefined,
+						inheritThinking: preset?.thinking === undefined,
+						incomingCount: 1,
+						outgoingCount: 0,
+						latestTask: message,
+						fresh: true,
+						reporterTaskIds: [reporterTaskId],
+					};
+					return { name, conversationId: child.id, reporterTaskId };
+				}, context);
+			},
+		);
 	}
 
 	async send(name: string, message: string): Promise<MessageResult> {
@@ -249,28 +269,43 @@ export class AgentService {
 		if (message.trim() === "") throw new Error("Send needs a non-empty message.");
 		const operationId = randomUUID();
 
-		return this.root.commit(async (tx) => {
-			const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
-			const agent = Object.hasOwn(state.agents, agentName) ? state.agents[agentName] : undefined;
-			if (agent === undefined) throw new Error(`No managed agent named "${agentName}".`);
-			agent.incomingCount = (agent.incomingCount ?? 0) + 1;
-			agent.latestTask = message;
-			agent.fresh = false;
-			agent.reporterTaskIds ??= [];
-			const reporterTaskId = await tx.createTask(
-				AgentReporter,
-				{
-					agentName,
-					conversationId: agent.conversationId,
-					message: messageFor(agentName, message),
-					requestId: `managed-agent:${operationId}`,
-					reportId: operationId,
+		return inTelemetrySpan(
+			this.#telemetry,
+			{
+				name: "durable_subagents.request",
+				attributes: {
+					"managed_agent.operation": "send",
+					"managed_agent.name": agentName,
+					...cappedContentAttributes("managed_agent.task.text", message),
 				},
-				{ ownership: { kind: "conversation" }, background: true },
-			);
-			agent.reporterTaskIds.push(reporterTaskId);
-			return { reporterTaskId, requestId: `managed-agent:${operationId}`, conversationId: agent.conversationId };
-		}, BACKGROUND_CONTEXT);
+			},
+			(span) => {
+				const context = span === undefined ? BACKGROUND_CONTEXT : withTelemetry(span, BACKGROUND_CONTEXT);
+				return this.root.commit(async (tx) => {
+					const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
+					const agent = Object.hasOwn(state.agents, agentName) ? state.agents[agentName] : undefined;
+					if (agent === undefined) throw new Error(`No managed agent named "${agentName}".`);
+					agent.incomingCount = (agent.incomingCount ?? 0) + 1;
+					agent.latestTask = message;
+					agent.fresh = false;
+					agent.reporterTaskIds ??= [];
+					const reporterTaskId = await tx.createTask(
+						AgentReporter,
+						{
+							agentName,
+							conversationId: agent.conversationId,
+							message: messageFor(agentName, message),
+							taskText: message,
+							requestId: `managed-agent:${operationId}`,
+							reportId: operationId,
+						},
+						{ ownership: { kind: "conversation" }, background: true },
+					);
+					agent.reporterTaskIds.push(reporterTaskId);
+					return { reporterTaskId, requestId: `managed-agent:${operationId}`, conversationId: agent.conversationId };
+				}, context);
+			},
+		);
 	}
 
 	async list(): Promise<AgentSummary[]> {

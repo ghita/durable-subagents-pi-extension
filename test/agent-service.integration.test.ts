@@ -7,6 +7,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
 	AgentDoc,
+	AssistantEntry,
 	createRegistry,
 	Harness,
 	type ModelRef,
@@ -15,6 +16,7 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { InMemoryTelemetryContext, type TelemetryContext } from "@earendil-works/pi-telemetry";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentService } from "../src/agent-service.ts";
 import type { AgentPreset, PresetCatalog } from "../src/presets.ts";
@@ -33,6 +35,7 @@ async function setup(
 	responses: string[],
 	tokensPerSecond = 100_000,
 	presets: PresetCatalog = { entries: new Map(), valid: new Map() },
+	telemetry?: TelemetryContext,
 ) {
 	const directory = await mkdtemp(join(tmpdir(), "durable-subagents-integration-"));
 	directories.push(directory);
@@ -51,6 +54,7 @@ async function setup(
 	const harness = await Harness.open(await openNodeSqliteStorage(join(directory, "session.sqlite")), {
 		models,
 		registry: durableRegistry,
+		...(telemetry === undefined ? {} : { telemetry }),
 		settings: { extensions: [CodingTools] },
 		env: (target) => new NodeExecutionEnv({ cwd: target.cwd ?? cwd }),
 	}, BACKGROUND_CONTEXT);
@@ -77,12 +81,166 @@ async function setup(
 		modelRegistry,
 		parentModel,
 		parentThinking: "off",
+		telemetry,
 	});
 	harness.resume();
 	return { service, harness, root, modelRegistry, model, directory, faux, models, durableRegistry, cwd, parentModel, presets };
 }
 
 describe("AgentService durable lifecycle", () => {
+	it("captures request-local tool activity when a child submission ends unanswered", async () => {
+		const telemetry = new InMemoryTelemetryContext();
+		const { service, harness, faux, directory } = await setup([], 100_000, { entries: new Map(), valid: new Map() }, telemetry);
+		const file = join(directory, "partial-tool-output.txt");
+		await writeFile(file, "tool output before model failure", "utf8");
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: file }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("synthetic provider failure", { stopReason: "error", errorMessage: "synthetic provider failure" }),
+		]);
+
+		const spawned = await service.spawn("failing-worker", undefined, "Read the file, then summarize it.");
+		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+
+		const executionSpan = telemetry.getSpans().find((span) =>
+			span.name === "durable_subagents.execution"
+			&& span.attributes["managed_agent.task.text"] === "Read the file, then summarize it.",
+		);
+		const events = executionSpan?.events ?? [];
+		expect(events.map((event) => event.name)).toEqual([
+			"managed_agent.user_message",
+			"managed_agent.tool_call",
+			"managed_agent.tool_result",
+			"managed_agent.assistant_response",
+			"managed_agent.execution_unanswered",
+			"managed_agent.report_created",
+		]);
+		expect(events.find((event) => event.name === "managed_agent.execution_unanswered")?.attributes[
+			"managed_agent.execution.reason"
+		]).toBe("model_error");
+		expect(events.find((event) => event.name === "managed_agent.tool_result")?.attributes["tool.output"])
+			.toContain("tool output before model failure");
+		expect(events.find((event) => event.name === "managed_agent.report_created")?.attributes["managed_agent.report.text"])
+			.toContain("ended without an answer (model_error)");
+	});
+
+	it("correlates managed requests with child model/tool payloads and report creation", async () => {
+		const telemetry = new InMemoryTelemetryContext();
+		const { service, harness, faux, directory } = await setup([], 100_000, { entries: new Map(), valid: new Map() }, telemetry);
+		const file = join(directory, "telemetry-tool-output.txt");
+		await writeFile(file, "tool output visible in the managed trace", "utf8");
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: file }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("The delegated answer with useful details."),
+		]);
+
+		const spawned = await service.spawn("telemetry-worker", undefined, "Read the file and summarize it.");
+		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+
+		const spans = telemetry.getSpans();
+		const requestSpan = spans.find((span) => span.name === "durable_subagents.request");
+		const executionSpan = spans.find((span) => span.name === "durable_subagents.execution");
+		expect(requestSpan?.attributes["managed_agent.task.text"]).toBe("Read the file and summarize it.");
+		expect(executionSpan).toBeDefined();
+		expect(executionSpan?.context["pi-memory-trace"]).toBe(requestSpan?.context["pi-memory-trace"]);
+		expect(executionSpan?.events).toEqual(expect.arrayContaining([
+			expect.objectContaining({ name: "managed_agent.user_message" }),
+			expect.objectContaining({ name: "managed_agent.tool_call" }),
+			expect.objectContaining({ name: "managed_agent.tool_result" }),
+			expect.objectContaining({ name: "managed_agent.assistant_response" }),
+			expect.objectContaining({ name: "managed_agent.report_created" }),
+		]));
+		const toolCall = executionSpan?.events.find((event) => event.name === "managed_agent.tool_call");
+		const toolResult = executionSpan?.events.find((event) => event.name === "managed_agent.tool_result");
+		expect(JSON.parse(String(toolCall?.attributes["tool.arguments"]))).toEqual({ path: file });
+		expect(toolResult?.attributes["tool.output"]).toContain("tool output visible in the managed trace");
+		const traces = spans.filter((span) => span.context["pi-memory-trace"] === requestSpan?.context["pi-memory-trace"]);
+		expect(traces.some((span) => span.name === "pi.durable.phase")).toBe(true);
+		const childSubmission = spans.find((span) => span.name === "pi.durable.submit");
+		expect(childSubmission?.links.some((link) =>
+			link.context["pi-memory-trace"] === executionSpan?.context["pi-memory-trace"],
+		)).toBe(true);
+
+		faux.setResponses([fauxAssistantMessage("The later request's answer.")]);
+		const sent = await service.send("telemetry-worker", "Handle only this later request.");
+		await harness.waitForTask(sent.reporterTaskId, BACKGROUND_CONTEXT);
+
+		const sendExecution = telemetry.getSpans().find((span) =>
+			span.name === "durable_subagents.execution"
+			&& span.attributes["managed_agent.task.text"] === "Handle only this later request.",
+		);
+		const sendEvents = sendExecution?.events ?? [];
+		expect(sendEvents.map((event) => event.name)).toEqual([
+			"managed_agent.user_message",
+			"managed_agent.assistant_response",
+			"managed_agent.report_created",
+		]);
+		expect(JSON.stringify(sendEvents)).not.toContain("Read the file and summarize it.");
+		expect(JSON.stringify(sendEvents)).not.toContain("telemetry-tool-output.txt");
+		expect(JSON.stringify(sendEvents)).not.toContain("tool output visible in the managed trace");
+	});
+
+	it("assigns shared-run telemetry to each steered input segment once", async () => {
+		const telemetry = new InMemoryTelemetryContext();
+		const { service, harness, faux } = await setup([], 100_000, { entries: new Map(), valid: new Map() }, telemetry);
+		faux.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("bash", { command: "sleep 1; printf 'shared-run-tool-output'" }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("The shared run answer."),
+		]);
+
+		const first = await service.spawn("steering-worker", undefined, "Start the first request.");
+		const child = await harness.conversation(first.conversationId, BACKGROUND_CONTEXT);
+		if (child === undefined) throw new Error("Expected the managed child conversation.");
+
+		const deadline = Date.now() + 5_000;
+		let toolCallVisible = false;
+		while (Date.now() < deadline) {
+			const view = await child.context(BACKGROUND_CONTEXT);
+			toolCallVisible = view.entries.some((entry) =>
+				AssistantEntry.is(entry)
+				&& entry.model?.some((message) =>
+					message.role === "assistant"
+					&& message.content.some((part) => part.type === "toolCall" && part.name === "bash"),
+				),
+			);
+			if (toolCallVisible) break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		expect(toolCallVisible).toBe(true);
+
+		const second = await service.send("steering-worker", "Steer while the first request is running.");
+		await Promise.all([
+			harness.waitForTask(first.reporterTaskId, BACKGROUND_CONTEXT),
+			harness.waitForTask(second.reporterTaskId, BACKGROUND_CONTEXT),
+		]);
+
+		const executions = telemetry.getSpans().filter((span) => span.name === "durable_subagents.execution");
+		const firstExecution = executions.find((span) => span.attributes["managed_agent.task.text"] === "Start the first request.");
+		const secondExecution = executions.find((span) => span.attributes["managed_agent.task.text"] === "Steer while the first request is running.");
+		const firstEvents = firstExecution?.events ?? [];
+		const secondEvents = secondExecution?.events ?? [];
+
+		// Durable may settle both steered inputs with one answer. Transcript events before the later input
+		// belong to the first trace; the later input and its resulting answer belong to the second trace.
+		expect(faux.state.callCount).toBe(2);
+		expect(firstEvents.map((event) => event.name)).toEqual([
+			"managed_agent.user_message",
+			"managed_agent.tool_call",
+			"managed_agent.tool_result",
+			"managed_agent.report_created",
+		]);
+		expect(secondEvents.map((event) => event.name)).toEqual([
+			"managed_agent.user_message",
+			"managed_agent.assistant_response",
+			"managed_agent.report_created",
+		]);
+		expect(JSON.stringify(firstEvents)).not.toContain("Steer while the first request is running.");
+		expect(JSON.stringify(secondEvents)).not.toContain("Start the first request.");
+		expect(JSON.stringify(secondEvents)).not.toContain("shared-run-tool-output");
+	});
+
 	it("spawns, reuses, counts, reports, and retains a named child conversation", async () => {
 		const { service, harness, root } = await setup(["first answer", "second answer"]);
 
