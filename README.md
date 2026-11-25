@@ -161,7 +161,7 @@ DURABLE_SUBAGENTS_OTLP_ENDPOINT=http://localhost:4318 \
 OTEL_EXPORTER_OTLP_HEADERS='Authorization=Bearer%20collector-token' pi
 ```
 
-When enabled, traces cover managed-agent requests through child model/tool activity and report delivery. Task text, assistant responses, tool-call arguments, and tool outputs are included (each field is capped at 64 KiB with truncation metadata); hidden reasoning and provider authentication material are excluded. This can still send private task/code content to the configured collector. Configure a trusted endpoint and review its access and retention policies. Telemetry setup/export failures are fail-open: agent work continues and telemetry may be lost. The extension does not write operational details or task content to a plain-text log.
+When enabled, traces cover managed-agent requests through child model/tool activity and report delivery. Task text, assistant responses, tool-call arguments, and tool outputs are included (each field is capped at 64 KiB with truncation metadata); hidden reasoning is excluded, and credential-like keys in tool arguments are redacted. Free-form task and tool content may still contain sensitive data, so configure a trusted collector and review its access and retention policies. Telemetry setup/export failures are fail-open: agent work continues and telemetry may be lost. The extension does not write operational details or task content to a plain-text log. See the [full telemetry guide](docs/telemetry.md) for HTTP/protobuf and gRPC setup, configuration, and troubleshooting.
 
 ## Safety and scope
 
