@@ -15,8 +15,6 @@ import { formatAgentList, formatAgentSummary, formatHelp, formatPresets, formatS
 import { modelReference } from "./model-bridge.ts";
 import { loadPresetCatalog } from "./presets.ts";
 import { openManagedSessionRuntime, type ManagedSessionRuntime, requireSessionFile } from "./runtime.ts";
-import { ExtensionLogger } from "./logger.ts";
-
 const SubagentParameters = Type.Object({
 	action: Type.Union([
 		Type.Literal("spawn", { description: "Start a named agent asynchronously. Returns an acknowledgment; its report is steered to the main agent at the next model-call boundary." }),
@@ -53,14 +51,12 @@ function ensureFooter(context: ExtensionContext, runtime: ManagedSessionRuntime)
 		return;
 	}
 	stopFooter();
-	const controller = new AgentFooterController(context, runtime.service, footerAlwaysOn, (error) => {
-		void runtime.logger.logException("footer", "refresh_failed", error);
-	});
+	const controller = new AgentFooterController(context, runtime.service, footerAlwaysOn, () => undefined);
 	activeFooter = { runtime, controller };
 	controller.wake();
 }
 
-async function getRuntime(pi: ExtensionAPI, context: ExtensionContext, logger: ExtensionLogger): Promise<ManagedSessionRuntime> {
+async function getRuntime(pi: ExtensionAPI, context: ExtensionContext): Promise<ManagedSessionRuntime> {
 	const sessionFile = requireSessionFile(context.sessionManager.getSessionFile());
 	if (activeRuntime?.sessionFile === sessionFile) {
 		ensureFooter(context, activeRuntime);
@@ -78,7 +74,7 @@ async function getRuntime(pi: ExtensionAPI, context: ExtensionContext, logger: E
 		await previous.close();
 	}
 
-	const promise = openManagedSessionRuntime(pi, context, logger);
+	const promise = openManagedSessionRuntime(pi, context);
 	opening = { sessionFile, promise };
 	try {
 		const runtime = await promise;
@@ -90,11 +86,10 @@ async function getRuntime(pi: ExtensionAPI, context: ExtensionContext, logger: E
 	}
 }
 
-async function notifyCommand(logger: ExtensionLogger, context: ExtensionContext, action: () => Promise<string>): Promise<void> {
+async function notifyCommand(context: ExtensionContext, action: () => Promise<string>): Promise<void> {
 	try {
 		context.ui.notify(await action(), "info");
 	} catch (error) {
-		await logger.logException("command", "handler_failed", error);
 		context.ui.notify(error instanceof Error ? error.message : String(error), "error");
 	} finally {
 		activeFooter?.controller.wake();
@@ -111,8 +106,8 @@ const STATUS_SNAPSHOT_GUIDANCE =
 async function observeAgent(runtime: ManagedSessionRuntime, name: string, conversationId: ConversationId): Promise<void> {
 	try {
 		await runtime.herdrMonitor?.trackAgent(name, conversationId);
-	} catch (error) {
-		await runtime.logger.logException("herdr", "track_agent_failed", error);
+	} catch {
+		// The optional Herdr display must not affect agent work.
 	}
 }
 
@@ -134,19 +129,16 @@ async function runToolAction(
 	}
 	if (args.action === "stop-all") {
 		const stopped = await service.stopAll();
-		await runtime.logger.logDebug("agent", "stop_all_completed");
 		return { text: stopped.length === 0 ? "No active managed agents." : `Stopped: ${stopped.join(", ")}.` };
 	}
 	if (args.action === "stop") {
 		if (args.name === undefined) throw new Error("stop needs a managed agent name.");
 		await service.stop(args.name);
-		await runtime.logger.logDebug("agent", "stop_completed");
 		return { text: `Stopped ${args.name}; its durable conversation and history are retained.` };
 	}
 	if (args.action === "spawn") {
 		if (args.message === undefined || args.message.trim() === "") throw new Error("spawn needs a task message.");
 		const result = await service.spawn(args.name, args.presetId, args.message);
-		await runtime.logger.logDebug("agent", "spawn_accepted");
 		await observeAgent(runtime, result.name, result.conversationId);
 		return {
 			text: `Started ${result.name} asynchronously. This is an acknowledgment, not the result. Its report arrives separately as a Pi steering message; if the main agent is busy, it is delivered at the next model call after the current tool batch completes. Continue other work meanwhile; do not poll status/list or resend the task to retrieve the report.`,
@@ -158,7 +150,6 @@ async function runToolAction(
 			throw new Error("send needs an agent name and a non-empty message.");
 		}
 		const result = await service.send(args.name, args.message);
-		await runtime.logger.logDebug("agent", "send_accepted");
 		await observeAgent(runtime, args.name, result.conversationId);
 		return {
 			text: `Submitted a new task to ${args.name} asynchronously. This is an acknowledgment, not the result; its report will arrive separately as a Pi steering message at the next model call. Sending again creates additional work and does not retrieve a pending report.`,
@@ -169,7 +160,6 @@ async function runToolAction(
 }
 
 export default async function durableSubagents(pi: ExtensionAPI): Promise<void> {
-	const logger = new ExtensionLogger(getAgentDir());
 	// Loading at extension initialization makes the preset view stable until Pi reloads this extension.
 	const presetCatalog = await loadPresetCatalog(getAgentDir());
 	const presetIds = [...presetCatalog.valid.keys()].sort((a, b) => a.localeCompare(b));
@@ -178,8 +168,7 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 		if (activeRuntime === undefined) return [];
 		try {
 			return (await activeRuntime.service.list()).map((agent) => agent.name);
-		} catch (error) {
-			await logger.logException("command", "agent_completions_failed", error);
+		} catch {
 			return [];
 		}
 	}
@@ -191,19 +180,19 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 			return getAgentCompletions(prefix, presetIds, names);
 		},
 		handler: async (args, context) => {
-			await notifyCommand(logger, context, async () => {
+			await notifyCommand(context, async () => {
 				const command = parseAgentsCommand(args);
 				if (command.action === "help") return formatHelp(presetCatalog);
 				if (command.action === "presets") return formatPresets(presetCatalog);
 				if (command.action === "footer") {
 					footerAlwaysOn = command.alwaysOn;
 					activeFooter?.controller.setAlwaysOn(footerAlwaysOn);
-					if (context.mode === "tui") await getRuntime(pi, context, logger);
+					if (context.mode === "tui") await getRuntime(pi, context);
 					return footerAlwaysOn
 						? "Agent footer is always on, including when no agents are running."
 						: "Agent footer now appears only during activity (and for the three-second hide delay).";
 				}
-				const runtime = await getRuntime(pi, context, logger);
+				const runtime = await getRuntime(pi, context);
 				if (command.action === "list") return formatAgentList(await runtime.service.list());
 				if (command.action === "status") return formatAgentSummary(await runtime.service.status(command.name));
 				if (command.action === "stats") {
@@ -212,23 +201,19 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 				}
 				if (command.action === "stop-all") {
 					const stopped = await runtime.service.stopAll();
-					await logger.logDebug("agent", "stop_all_completed");
 					return stopped.length === 0 ? "No active managed agents." : `Stopped: ${stopped.join(", ")}.`;
 				}
 				if (command.action === "stop") {
 					await runtime.service.stop(command.name);
-					await logger.logDebug("agent", "stop_completed");
 					return `Stopped ${command.name}; its durable conversation and history are retained.`;
 				}
 				if (command.action === "send") {
 					const result = await runtime.service.send(command.name, command.message);
-					await logger.logDebug("agent", "send_accepted");
 					await observeAgent(runtime, command.name, result.conversationId);
 					return `Sent a steering instruction to ${command.name}.`;
 				}
 				if (command.action === "spawn") {
 					const result = await runtime.service.spawn(command.name, command.presetId, command.message);
-					await logger.logDebug("agent", "spawn_accepted");
 					await observeAgent(runtime, result.name, result.conversationId);
 					return `Started ${result.name}; the agent is working independently and will report when finished.`;
 				}
@@ -248,14 +233,13 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 		execute: async (_toolCallId, args, _signal, _onUpdate, context: ExtensionToolContext) => {
 			try {
-				const runtime = await getRuntime(pi, context, logger);
+				const runtime = await getRuntime(pi, context);
 				const result = await runToolAction(runtime, args);
 				return {
 					content: [{ type: "text" as const, text: result.text }],
 					details: result.details ?? {},
 				};
 			} catch (error) {
-				await logger.logException("tool", "execute_failed", error);
 				return {
 					content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
 					details: {},
@@ -270,9 +254,8 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 	pi.on("session_start", async (_event, context) => {
 		if (context.sessionManager.getSessionFile() === undefined) return;
 		try {
-			await getRuntime(pi, context, logger);
+			await getRuntime(pi, context);
 		} catch (error) {
-			await logger.logException("runtime", "session_start_failed", error);
 			context.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		}
 	});
@@ -285,7 +268,6 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 			try {
 				await previous.close();
 			} catch (error) {
-				await logger.logException("runtime", "session_shutdown_failed", error);
 				context.ui.notify(`Durable subagent shutdown failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		}
@@ -299,7 +281,6 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 		propagation = propagation
 			.then(() => runtime.service.updateInherited(ref, thinking))
 			.catch(async (error) => {
-				await logger.logException("runtime", "inherited_model_update_failed", error);
 				context.ui.notify(`Could not update inherited agent model: ${error instanceof Error ? error.message : String(error)}`, "error");
 			});
 		await propagation;
@@ -314,7 +295,6 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 		propagation = propagation
 			.then(() => runtime.service.updateInherited(ref, thinking))
 			.catch(async (error) => {
-				await logger.logException("runtime", "inherited_thinking_update_failed", error);
 				context.ui.notify(`Could not update inherited agent thinking: ${error instanceof Error ? error.message : String(error)}`, "error");
 			});
 		await propagation;

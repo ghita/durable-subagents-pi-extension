@@ -144,24 +144,24 @@ When the extension runs in a Herdr-managed pane, each newly spawned agent gets i
 
 Each pane gets an identity header with the agent name, configured model, and thinking level. Thereafter the terminal is append-only: full user inputs, every assistant text message (not thinking content), and completed tool calls with the tool name, compact arguments (up to 500 characters), and finished/failed status. Tool results are not copied. Changes to an inherited model or thinking level are appended as configuration lines; the original header is not rewritten. Existing panes resume without replaying old transcript entries; on the first update after this change, the new identity header is appended once and its format version is persisted. Newly created panes start with a header and currently visible entries. Concurrent agents append to separate panes. Each pane uses a persistent renderer over a private local socket, so the Node bootstrap command is run once per pane rather than echoed for every transcript update. Existing managed-agent panes are reflowed into an equally sized right-side stack in the current tab when the session resumes; a pane closed during a session is recreated on the next agent update.
 
-The integration is enabled only when `HERDR_ENV=1` and `HERDR_WORKSPACE_ID` are present and the `herdr` CLI is available; failures are logged and do not stop agent work.
+The integration is enabled only when `HERDR_ENV=1` and `HERDR_WORKSPACE_ID` are present and the `herdr` CLI is available; failures do not stop agent work.
 
-### Logging
+### Opt-in OpenTelemetry
 
-Operational exceptions caught by the extension at failure-handling boundaries are appended as readable text to `<Pi agent directory>/logs/durable-subagents.log` (by default `~/.pi/agent/logs/durable-subagents.log`). The file is shared across Pi sessions. Entries include a timestamp, component/event label, and exception details/stack trace. Set `PI_DURABLE_SUBAGENTS_LOG_LEVEL=debug` before starting Pi to also log selected runtime, agent-action, and report-delivery lifecycle events; unset or other values keep exception-only logging. Expected recovery/fallback errors are not necessarily logged, and the extension does not install process-wide exception handlers. Logging is best effort; a log-write failure falls back to `console.error`. Task messages, prompts, and reports are not intentionally logged.
-
-PowerShell:
+Telemetry export is disabled unless `DURABLE_SUBAGENTS_OTLP_ENDPOINT` is set. The value is the OTLP collector base endpoint (for example, `http://localhost:4318`); HTTP/protobuf is the default transport and the extension sends traces to `/v1/traces` and metrics to `/v1/metrics`. Set `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` for an OTLP/gRPC collector. Standard OpenTelemetry headers, signal-specific endpoints, timeouts, resource attributes, and metric export interval settings are also honored. For example:
 
 ```powershell
-$env:PI_DURABLE_SUBAGENTS_LOG_LEVEL = "debug"
+$env:DURABLE_SUBAGENTS_OTLP_ENDPOINT = "http://localhost:4318"
+$env:OTEL_EXPORTER_OTLP_HEADERS = "Authorization=Bearer%20collector-token"
 pi
 ```
 
-Bash:
-
 ```sh
-PI_DURABLE_SUBAGENTS_LOG_LEVEL=debug pi
+DURABLE_SUBAGENTS_OTLP_ENDPOINT=http://localhost:4318 \
+OTEL_EXPORTER_OTLP_HEADERS='Authorization=Bearer%20collector-token' pi
 ```
+
+When enabled, traces cover managed-agent requests through child model/tool activity and report delivery. Task text, assistant responses, tool-call arguments, and tool outputs are included (each field is capped at 64 KiB with truncation metadata); hidden reasoning and provider authentication material are excluded. This can still send private task/code content to the configured collector. Configure a trusted endpoint and review its access and retention policies. Telemetry setup/export failures are fail-open: agent work continues and telemetry may be lost. The extension does not write operational details or task content to a plain-text log.
 
 ## Safety and scope
 

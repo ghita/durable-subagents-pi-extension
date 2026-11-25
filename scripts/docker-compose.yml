@@ -1,0 +1,16 @@
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix
+    restart: unless-stopped
+    environment:
+      PHOENIX_WORKING_DIR: /phoenix
+      PHOENIX_ENABLE_AUTH: "false" # Development only; host ports below bind to loopback.
+    ports:
+      - "127.0.0.1:6006:6006" # Phoenix UI and OTLP/HTTP, localhost only
+      - "127.0.0.1:4317:4317" # OTLP/gRPC, localhost only
+    volumes:
+      - phoenix-data:/phoenix
+
+volumes:
+  phoenix-data:

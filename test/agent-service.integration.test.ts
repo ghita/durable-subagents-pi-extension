@@ -15,6 +15,7 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { InMemoryTelemetryContext, type TelemetryContext } from "@earendil-works/pi-telemetry";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentService } from "../src/agent-service.ts";
 import type { AgentPreset, PresetCatalog } from "../src/presets.ts";
@@ -33,6 +34,7 @@ async function setup(
 	responses: string[],
 	tokensPerSecond = 100_000,
 	presets: PresetCatalog = { entries: new Map(), valid: new Map() },
+	telemetry?: TelemetryContext,
 ) {
 	const directory = await mkdtemp(join(tmpdir(), "durable-subagents-integration-"));
 	directories.push(directory);
@@ -51,6 +53,7 @@ async function setup(
 	const harness = await Harness.open(await openNodeSqliteStorage(join(directory, "session.sqlite")), {
 		models,
 		registry: durableRegistry,
+		...(telemetry === undefined ? {} : { telemetry }),
 		settings: { extensions: [CodingTools] },
 		env: (target) => new NodeExecutionEnv({ cwd: target.cwd ?? cwd }),
 	}, BACKGROUND_CONTEXT);
@@ -77,12 +80,51 @@ async function setup(
 		modelRegistry,
 		parentModel,
 		parentThinking: "off",
+		telemetry,
 	});
 	harness.resume();
 	return { service, harness, root, modelRegistry, model, directory, faux, models, durableRegistry, cwd, parentModel, presets };
 }
 
 describe("AgentService durable lifecycle", () => {
+	it("correlates managed requests with child model/tool payloads and report creation", async () => {
+		const telemetry = new InMemoryTelemetryContext();
+		const { service, harness, faux, directory } = await setup([], 100_000, { entries: new Map(), valid: new Map() }, telemetry);
+		const file = join(directory, "telemetry-tool-output.txt");
+		await writeFile(file, "tool output visible in the managed trace", "utf8");
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: file }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("The delegated answer with useful details."),
+		]);
+
+		const spawned = await service.spawn("telemetry-worker", undefined, "Read the file and summarize it.");
+		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+
+		const spans = telemetry.getSpans();
+		const requestSpan = spans.find((span) => span.name === "durable_subagents.request");
+		const executionSpan = spans.find((span) => span.name === "durable_subagents.execution");
+		expect(requestSpan?.attributes["managed_agent.task.text"]).toBe("Read the file and summarize it.");
+		expect(executionSpan).toBeDefined();
+		expect(executionSpan?.context["pi-memory-trace"]).toBe(requestSpan?.context["pi-memory-trace"]);
+		expect(executionSpan?.events).toEqual(expect.arrayContaining([
+			expect.objectContaining({ name: "managed_agent.user_message" }),
+			expect.objectContaining({ name: "managed_agent.tool_call" }),
+			expect.objectContaining({ name: "managed_agent.tool_result" }),
+			expect.objectContaining({ name: "managed_agent.assistant_response" }),
+			expect.objectContaining({ name: "managed_agent.report_created" }),
+		]));
+		const toolCall = executionSpan?.events.find((event) => event.name === "managed_agent.tool_call");
+		const toolResult = executionSpan?.events.find((event) => event.name === "managed_agent.tool_result");
+		expect(JSON.parse(String(toolCall?.attributes["tool.arguments"]))).toEqual({ path: file });
+		expect(toolResult?.attributes["tool.output"]).toContain("tool output visible in the managed trace");
+		const traces = spans.filter((span) => span.context["pi-memory-trace"] === requestSpan?.context["pi-memory-trace"]);
+		expect(traces.some((span) => span.name === "pi.durable.phase")).toBe(true);
+		const childSubmission = spans.find((span) => span.name === "pi.durable.submit");
+		expect(childSubmission?.links.some((link) =>
+			link.context["pi-memory-trace"] === executionSpan?.context["pi-memory-trace"],
+		)).toBe(true);
+	});
+
 	it("spawns, reuses, counts, reports, and retains a named child conversation", async () => {
 		const { service, harness, root } = await setup(["first answer", "second answer"]);
 

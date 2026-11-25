@@ -34,6 +34,14 @@ A response from a managed agent delivered to the main agent. Count it when deliv
 A Pi session backed by a saved transcript path that can be reopened. Durable managed agents require this session type; temporary or transcript-less sessions are unsupported.
 _Avoid_: Durable session (when referring only to Pi's transcript)
 
+## Agent diagnostics
+
+**Managed-agent telemetry**:
+Diagnostic data about managed-agent work, including task content, model responses, tool interactions, outcomes, and report delivery.
+
+**Managed-agent trace**:
+A correlated diagnostic record of one managed-agent request, from accepted instruction through the agent's work to its outgoing report.
+
 ## Agent capabilities
 
 **Agent tool set**:
