@@ -238,7 +238,7 @@ export const AgentReporter = defineTask<ReporterInput, ReporterState, null>({
 						);
 						const answer = answerEntry?.model?.[0] as AssistantMessage | undefined;
 						reportText = assistantText(answer) || "The agent finished without a text response.";
-						captureConversationContent(span, answerContext, settled.entry, settled.answer);
+						await captureSubmissionContentBestEffort(span, settled.entry, settled.answer, async () => answerContext);
 					}
 
 					if (reportText !== undefined) {
