@@ -50,6 +50,19 @@ export async function openManagedSessionRuntime(
 	context: ExtensionContext,
 ): Promise<ManagedSessionRuntime> {
 	const optInTelemetry: OptInTelemetry | undefined = createOptInTelemetry();
+	try {
+		return await initializeManagedSessionRuntime(pi, context, optInTelemetry);
+	} catch (error) {
+		await optInTelemetry?.close();
+		throw error;
+	}
+}
+
+async function initializeManagedSessionRuntime(
+	pi: ExtensionAPI,
+	context: ExtensionContext,
+	optInTelemetry: OptInTelemetry | undefined,
+): Promise<ManagedSessionRuntime> {
 	const telemetry = optInTelemetry?.context;
 	const sessionFile = requireSessionFile(context.sessionManager.getSessionFile());
 	const databasePath = durableDatabasePath(sessionFile);
