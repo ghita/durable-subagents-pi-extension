@@ -6,6 +6,7 @@ import {
 	defineTask,
 	type ConversationId,
 	type ContextView,
+	type EntryId,
 	type TaskId,
 } from "@earendil-works/pi-durable";
 import { SubagentsDoc } from "./agent-state.ts";
@@ -53,10 +54,29 @@ function textContent(value: { content?: unknown } | undefined): string {
 	).join("");
 }
 
-function captureConversationContent(span: TelemetrySpan | undefined, view: ContextView): void {
+function entriesForSubmission(view: ContextView, inputEntryId: EntryId, answerEntryId: EntryId): ContextView["entries"] {
+	const entries = view.entries;
+	const start = entries.findIndex((entry) => entry.id === inputEntryId);
+	const answer = entries.findIndex((entry) => entry.id === answerEntryId);
+	if (start < 0 || answer < start) return [];
+
+	// A run may answer several steered submissions together. Assign each transcript segment to the
+	// input that starts it: a later user entry closes this segment, and the final answer belongs to
+	// the latest input. This avoids replaying prior turns or claiming shared run activity repeatedly.
+	const nextInput = entries.findIndex((entry, index) => index > start && UserEntry.is(entry));
+	const end = nextInput < 0 ? answer : Math.min(answer, nextInput - 1);
+	return entries.slice(start, end + 1);
+}
+
+function captureConversationContent(
+	span: TelemetrySpan | undefined,
+	view: ContextView,
+	inputEntryId: EntryId,
+	answerEntryId: EntryId,
+): void {
 	if (span === undefined) return;
 	const calls = new Map<string, ToolCall>();
-	for (const entry of view.entries) {
+	for (const entry of entriesForSubmission(view, inputEntryId, answerEntryId)) {
 		if (AssistantEntry.is(entry)) {
 			const message = entry.model?.[0] as AssistantMessage | undefined;
 			if (message?.role !== "assistant") continue;
@@ -158,7 +178,7 @@ export const AgentReporter = defineTask<ReporterInput, ReporterState, null>({
 						);
 						const answer = answerEntry?.model?.[0] as AssistantMessage | undefined;
 						reportText = assistantText(answer) || "The agent finished without a text response.";
-						captureConversationContent(span, answerContext);
+						captureConversationContent(span, answerContext, settled.entry, settled.answer);
 					}
 
 					if (reportText !== undefined) {
