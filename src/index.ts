@@ -33,7 +33,10 @@ const SubagentParameters = Type.Object({
 let activeRuntime: ManagedSessionRuntime | undefined;
 let activeFooter: { runtime: ManagedSessionRuntime; controller: AgentFooterController } | undefined;
 let footerAlwaysOn = false;
-let opening: { sessionFile: string; promise: Promise<ManagedSessionRuntime> } | undefined;
+// Runtime-only, deliberately outside individual managed-session runtimes.
+let paneLimit = 3;
+let runtimeEpoch = 0;
+let runtimeTail: Promise<unknown> = Promise.resolve();
 let propagation = Promise.resolve();
 
 function stopFooter(): void {
@@ -56,34 +59,41 @@ function ensureFooter(context: ExtensionContext, runtime: ManagedSessionRuntime)
 	controller.wake();
 }
 
+function serializeRuntime<T>(action: () => Promise<T>): Promise<T> {
+	const next = runtimeTail.then(action);
+	runtimeTail = next.catch(() => undefined);
+	return next;
+}
+
 async function getRuntime(pi: ExtensionAPI, context: ExtensionContext): Promise<ManagedSessionRuntime> {
 	const sessionFile = requireSessionFile(context.sessionManager.getSessionFile());
-	if (activeRuntime?.sessionFile === sessionFile) {
-		ensureFooter(context, activeRuntime);
-		return activeRuntime;
-	}
-	if (opening?.sessionFile === sessionFile) {
-		const runtime = await opening.promise;
+	const epoch = runtimeEpoch;
+	return serializeRuntime(async () => {
+		if (epoch !== runtimeEpoch) throw new Error("Managed-agent session changed while opening its runtime.");
+		if (activeRuntime?.sessionFile !== sessionFile) {
+			const previous = activeRuntime;
+			activeRuntime = undefined;
+			stopFooter();
+			await previous?.close();
+			if (epoch !== runtimeEpoch) throw new Error("Managed-agent session changed while opening its runtime.");
+			const runtime = await openManagedSessionRuntime(pi, context, paneLimit);
+			if (epoch !== runtimeEpoch) {
+				await runtime.close();
+				throw new Error("Managed-agent session changed while opening its runtime.");
+			}
+			activeRuntime = runtime;
+		}
+		const runtime = activeRuntime;
+		// The preference may have changed while opening, or startup/reload may
+		// have reset it while a runtime was already present.
+		if (runtime.herdrMonitor !== undefined && runtime.herdrMonitor.paneLimit !== paneLimit) {
+			try { await runtime.herdrMonitor.setPaneLimit(paneLimit); }
+			catch (error) { runtime.reportDisplayError(error); }
+		}
+		if (epoch !== runtimeEpoch) throw new Error("Managed-agent session changed while opening its runtime.");
 		ensureFooter(context, runtime);
 		return runtime;
-	}
-	if (activeRuntime !== undefined) {
-		const previous = activeRuntime;
-		activeRuntime = undefined;
-		stopFooter();
-		await previous.close();
-	}
-
-	const promise = openManagedSessionRuntime(pi, context);
-	opening = { sessionFile, promise };
-	try {
-		const runtime = await promise;
-		activeRuntime = runtime;
-		ensureFooter(context, runtime);
-		return runtime;
-	} finally {
-		if (opening?.promise === promise) opening = undefined;
-	}
+	});
 }
 
 async function notifyCommand(context: ExtensionContext, action: () => Promise<string>): Promise<void> {
@@ -106,8 +116,8 @@ const STATUS_SNAPSHOT_GUIDANCE =
 async function observeAgent(runtime: ManagedSessionRuntime, name: string, conversationId: ConversationId): Promise<void> {
 	try {
 		await runtime.herdrMonitor?.trackAgent(name, conversationId);
-	} catch {
-		// The optional Herdr display must not affect agent work.
+	} catch (error) {
+		runtime.reportDisplayError(error);
 	}
 }
 
@@ -176,14 +186,39 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 	pi.registerCommand("agents", {
 		description: `Manage persistent named background agents. ${describePresetIds(presetIds)}`,
 		getArgumentCompletions: async (prefix) => {
+			if (/^panes\s/.test(prefix)) {
+				const match = prefix.match(/^(panes\s+)(\d*)$/);
+				if (match === null) return null;
+				return ["0", "1", "2", "3", "4", "5"].filter((value) => value.startsWith(match[2]!))
+					.map((value) => ({ value: match[1] + value, label: value }));
+			}
 			const names = await agentNames();
-			return getAgentCompletions(prefix, presetIds, names);
+			const items = getAgentCompletions(prefix, presetIds, names);
+			if (!/\s/.test(prefix) && "panes".startsWith(prefix.toLowerCase())) {
+				return [...(items ?? []), { value: "panes", label: "panes" }];
+			}
+			return items;
 		},
 		handler: async (args, context) => {
 			await notifyCommand(context, async () => {
 				const command = parseAgentsCommand(args);
-				if (command.action === "help") return formatHelp(presetCatalog);
+				if (command.action === "help") return `${formatHelp(presetCatalog)}
+/agents panes [K] - show or set the current tab's agent-display budget (default 3; 0 disables displays).`;
 				if (command.action === "presets") return formatPresets(presetCatalog);
+				if (command.action === "panes") {
+					if (command.limit !== undefined) {
+						// Set before opening a runtime: K=0 must never transiently restore panes.
+						paneLimit = command.limit;
+						const runtime = await getRuntime(pi, context);
+						try {
+							await runtime.herdrMonitor?.setPaneLimit(paneLimit);
+						} catch (error) {
+							runtime.reportDisplayError(error);
+							return `Agent-display pane budget: ${paneLimit}. Display reconciliation failed; agent work continues and reconciliation will retry.`;
+						}
+					}
+					return `Agent-display pane budget: ${paneLimit} for the current Herdr tab (0 disables displays). Runtime-only; resets to 3 on extension reload or Pi restart.`;
+				}
 				if (command.action === "footer") {
 					footerAlwaysOn = command.alwaysOn;
 					activeFooter?.controller.setAlwaysOn(footerAlwaysOn);
@@ -251,7 +286,8 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 		},
 	});
 
-	pi.on("session_start", async (_event, context) => {
+	pi.on("session_start", async (event, context) => {
+		if (event.reason === "reload" || event.reason === "startup") paneLimit = 3;
 		if (context.sessionManager.getSessionFile() === undefined) return;
 		try {
 			await getRuntime(pi, context);
@@ -261,16 +297,20 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 	});
 
 	pi.on("session_shutdown", async (_event, context) => {
-		const previous = activeRuntime;
-		activeRuntime = undefined;
-		stopFooter();
-		if (previous !== undefined) {
-			try {
-				await previous.close();
-			} catch (error) {
-				context.ui.notify(`Durable subagent shutdown failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+		// Invalidate pending opens immediately, then wait for their cleanup before
+		// closing the active runtime. A late open must never resurrect this session.
+		runtimeEpoch += 1;
+		await serializeRuntime(async () => {
+			const previous = activeRuntime;
+			activeRuntime = undefined;
+			stopFooter();
+			if (previous !== undefined) {
+				try { await previous.close(); }
+				catch (error) {
+					context.ui.notify(`Durable subagent shutdown failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+				}
 			}
-		}
+		});
 	});
 
 	pi.on("model_select", async (event, context) => {

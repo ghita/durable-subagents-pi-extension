@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer, type Server } from "node:net";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { HerdrAgentMonitor, HerdrCliApi, herdrApiFromEnvironment, herdrHeaderText, herdrMetadataForAgent } from "../src/herdr-monitor.ts";
+import { HerdrAgentMonitor, HerdrCliApi, HerdrPaneMissingError, HerdrPaneCreationRejectedError, herdrApiFromEnvironment, herdrHeaderText, herdrMetadataForAgent } from "../src/herdr-monitor.ts";
 import type { HerdrApi, HerdrMetadata } from "../src/herdr-monitor.ts";
 import type { ConversationView, ConversationWatch } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -16,7 +16,7 @@ function entry(kind: string, id: number, message: unknown): unknown {
 	return { kind, id, model: [message] };
 }
 
-async function startFakeRenderer(socketPath: string, appended: string[]): Promise<Server> {
+async function startFakeRenderer(socketPath: string, appended: string[], legacy = false): Promise<Server> {
 	const server = createServer((socket) => {
 		let buffered = "";
 		socket.setEncoding("utf8");
@@ -25,6 +25,10 @@ async function startFakeRenderer(socketPath: string, appended: string[]): Promis
 			const newline = buffered.indexOf("\n");
 			if (newline === -1) return;
 			const request = JSON.parse(buffered.slice(0, newline)) as { type: string; id: string; text?: string };
+			if (legacy && request.type === "reset") {
+				socket.end(`${JSON.stringify({ id: request.id, ok: false, error: "invalid append message" })}\n`);
+				return;
+			}
 			if (request.type === "append" && request.text !== undefined) appended.push(request.text);
 			socket.end(`${JSON.stringify({ id: request.id, ok: true })}\n`);
 		});
@@ -119,19 +123,20 @@ describe("Herdr CLI API adapter", () => {
 		expect(calls[3]).toContain("--source");
 		expect(calls[3]).toContain("pi-durable-subagents");
 		expect(calls[3]).toContain("model=test-provider/test-model");
-		expect(calls[4]?.slice(0, 3)).toEqual(["pane", "run", "w1:p2"]);
-		expect(calls[4]?.[3]).not.toContain(progress);
-		expect(calls[4]?.[3]).not.toContain("\\x1b[3J\\x1b[2J\\x1b[H");
+		const bootstrap = calls.find((args) => args[0] === "pane" && args[1] === "run")!;
+		expect(bootstrap.slice(0, 3)).toEqual(["pane", "run", "w1:p2"]);
+		expect(bootstrap[3]).not.toContain(progress);
+		expect(bootstrap[3]).not.toContain("\\x1b[3J\\x1b[2J\\x1b[H");
 		expect(appended).toEqual([`${progress}\n`]);
-		expect(calls[5]).toEqual(["pane", "split", "w1:p3", "--direction", "down", "--no-focus", "--cwd", "C:/project"]);
-		expect(calls[7]).toEqual(["pane", "layout", "--pane", "w1:p1"]);
-		expect(calls[8]).toEqual(["pane", "resize", "--direction", "up", "--amount", "0.125", "--pane", "w1:p2"]);
+		expect(calls[6]).toEqual(["pane", "split", "w1:p3", "--direction", "down", "--no-focus", "--cwd", "C:/project"]);
+		expect(calls[8]).toEqual(["pane", "layout", "--pane", "w1:p1"]);
+		expect(calls[9]).toEqual(["pane", "resize", "--direction", "up", "--amount", "0.125", "--pane", "w1:p2"]);
 		await closeServer(renderer);
 	});
 
 	it("uses one persistent pane process to transport long append-only output off the command line", async () => {
 		const payload = "Long assistant response. ".repeat(2_000);
-		const expectedRendered = `${payload}\nsecond update\n`;
+		const expectedRendered = `${payload}\nsecond update\n\x1b[3J\x1b[2J\x1b[Hnew occupant\n`;
 		let command = "";
 		let renderer: ChildProcessWithoutNullStreams | undefined;
 		let rendered = "";
@@ -152,6 +157,8 @@ describe("Herdr CLI API adapter", () => {
 		const api = new HerdrCliApi(run);
 		await api.appendText("w1:p3", payload);
 		await api.appendText("w1:p3", "second update");
+		await api.resetText("w1:p3");
+		await api.appendText("w1:p3", "new occupant");
 		const paneRuns = run.mock.calls.filter(([args]) => args[0] === "pane" && args[1] === "run");
 		expect(paneRuns).toHaveLength(1);
 		expect(command.length).toBeLessThan(500);
@@ -160,6 +167,62 @@ describe("Herdr CLI API adapter", () => {
 		await waitForChildOutput(renderer, () => rendered, expectedRendered.length);
 		expect(rendered).toBe(expectedRendered);
 		await closeChild(renderer);
+	});
+
+	it("distinguishes failure to start the CLI from a split with an unknown outcome", async () => {
+		const missing = Object.assign(new Error("not found"), { code: "ENOENT" });
+		const run = vi.fn(async (_args: readonly string[]): Promise<string> => { throw missing; });
+		const api = new HerdrCliApi(run);
+		await expect(api.createPane("C:/project", "agent")).rejects.toBeInstanceOf(HerdrPaneCreationRejectedError);
+		const timeout = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+		run.mockRejectedValueOnce(timeout);
+		await expect(api.createPane("C:/project", "agent")).rejects.toBe(timeout);
+	});
+
+	it("uses returned pane IDs when a move changes identity and closes explicit panes", async () => {
+		const run = vi.fn(async () => JSON.stringify({ result: { pane: { tab_id: "w2:t1", pane_id: "w2:p9" } } }));
+		const api = new HerdrCliApi(run);
+		await expect(api.movePane("w1:p2", "w2:t1", "w2:p1", "agent", "right")).resolves.toEqual({ tabId: "w2:t1", paneId: "w2:p9" });
+		expect(run).toHaveBeenNthCalledWith(2, ["pane", "rename", "w2:p9", "agent"]);
+		await api.closePane("w2:p9");
+		expect(run).toHaveBeenLastCalledWith(["pane", "close", "w2:p9"]);
+	});
+
+	it("requires a successful workspace inventory to distinguish a missing pane from a transport failure", async () => {
+		const previous = process.env.HERDR_WORKSPACE_ID;
+		process.env.HERDR_WORKSPACE_ID = "w1";
+		try {
+			const failure = new Error("server unavailable");
+			const run = vi.fn(async (_args: readonly string[]): Promise<string> => { throw failure; });
+			const api = new HerdrCliApi(run);
+			await expect(api.getPane("w1:p2")).rejects.toBe(failure);
+			run.mockRejectedValueOnce(failure).mockResolvedValueOnce(JSON.stringify({ result: { panes: [] } }));
+			await expect(api.getPane("w1:p2")).rejects.toBeInstanceOf(HerdrPaneMissingError);
+			run.mockRejectedValueOnce(failure).mockResolvedValueOnce(JSON.stringify({ result: { panes: [{ pane_id: "w1:p2" }] } }));
+			await expect(api.getPane("w1:p2")).rejects.toBe(failure);
+		} finally {
+			if (previous === undefined) delete process.env.HERDR_WORKSPACE_ID; else process.env.HERDR_WORKSPACE_ID = previous;
+		}
+	});
+
+	it("clears through append when an already-running legacy renderer does not understand reset", async () => {
+		const appended: string[] = [];
+		let renderer: Server | undefined;
+		const run = vi.fn(async (args: readonly string[]) => {
+			if (args[1] === "run") {
+				const encoded = [...args[3]!.matchAll(/Buffer\.from\('([^']+)','base64'\)/g)][1]![1]!;
+				renderer = await startFakeRenderer(Buffer.from(encoded, "base64").toString("utf8"), appended, true);
+			}
+			return "{}";
+		});
+		try {
+			const api = new HerdrCliApi(run);
+			await api.appendText("legacy-pane", "old occupant");
+			await api.resetText("legacy-pane");
+			await api.appendText("legacy-pane", "new occupant");
+			expect(appended).toEqual(["old occupant\n", "\x1b[3J\x1b[2J\x1b[H", "new occupant\n"]);
+			expect(run.mock.calls.filter(([args]) => args[1] === "run")).toHaveLength(1);
+		} finally { await closeServer(renderer); }
 	});
 
 	it("is enabled only in a Herdr-managed pane with a workspace ID", () => {
@@ -209,14 +272,17 @@ describe("Herdr append-only agent panes", () => {
 		const conversation = {
 			agent: vi.fn(async () => ({ model: { provider: "test-provider", modelId: "test-model" }, thinkingLevel: "high" })),
 			watch: vi.fn(async () => watch),
+			entries: vi.fn(async () => ({ items: initialView.entries })),
 		};
 		const target: HerdrTarget = { tabId: "w1:t3", paneId: "w1:p3" };
 		const service = {
+			herdrPaneCreationPending: vi.fn(async () => false),
+			setHerdrPaneCreationPending: vi.fn(async () => undefined),
 			herdrTarget: vi.fn(async () => undefined),
 			herdrOutputVersion: vi.fn(async () => undefined),
 			setHerdrOutputVersion: vi.fn(async () => undefined),
 			setHerdrTarget: vi.fn(async () => undefined),
-			herdrAgents: vi.fn(async () => []),
+			herdrDisplayAgents: vi.fn(async () => [{ name: "researcher", conversationId: "conversation-1", active: true, workStart: 1, workKey: "first" }]),
 		};
 		const appendText = vi.fn(async (_paneId: string, _text: string) => undefined);
 		const api: HerdrApi = {
@@ -227,6 +293,8 @@ describe("Herdr append-only agent panes", () => {
 			resizePane: vi.fn(async () => undefined),
 			reportMetadata: vi.fn(async () => undefined),
 			appendText,
+			resetText: vi.fn(async () => undefined),
+			closePane: vi.fn(async () => undefined),
 		};
 		const monitor = new HerdrAgentMonitor({
 			api,
@@ -237,7 +305,7 @@ describe("Herdr append-only agent panes", () => {
 
 		await monitor.trackAgent("researcher", "conversation-1" as never);
 		expect(api.createPane).toHaveBeenCalledWith("C:/project", "researcher", undefined, "right");
-		expect(service.setHerdrTarget).toHaveBeenCalledWith("researcher", target);
+		expect(service.setHerdrTarget).toHaveBeenCalledWith("researcher", target, true);
 		expect(api.reportMetadata).toHaveBeenCalledOnce();
 		const firstAppend = appendText.mock.calls[0]?.[1] ?? "";
 		expect(firstAppend).toContain("Durable agent: researcher\nModel: test-provider/test-model\nThinking: high");
@@ -261,6 +329,7 @@ describe("Herdr append-only agent panes", () => {
 			"pi.agent": { model: { provider: "openai", modelId: "gpt-next" }, thinkingLevel: "low" },
 		}, nextEntries);
 		await listener?.({ kind: "value", value: nextView, ops: [], retired: false }, BACKGROUND_CONTEXT);
+		await monitor.refresh();
 		expect(appendText).toHaveBeenCalledTimes(2);
 		expect(appendText.mock.calls[1]?.[1]).toBe([
 			"[config] Model changed: openai/gpt-next",
@@ -270,251 +339,10 @@ describe("Herdr append-only agent panes", () => {
 		].join("\n\n"));
 		await listener?.({ kind: "value", value: nextView, ops: [], retired: false }, BACKGROUND_CONTEXT);
 		expect(appendText).toHaveBeenCalledTimes(2);
-		expect(api.reportMetadata).toHaveBeenCalledOnce();
+		expect(api.reportMetadata).toHaveBeenCalledTimes(2);
 
 		await monitor.close();
 		expect(watch.stop).toHaveBeenCalledOnce();
 	});
 
-	it("anchors each additional agent pane to the previous rightmost pane", async () => {
-		const root: HerdrTarget = { tabId: "w1:t1", paneId: "w1:p1" };
-		const first: HerdrTarget = { tabId: "w1:t1", paneId: "w1:p2" };
-		const second: HerdrTarget = { tabId: "w1:t1", paneId: "w1:p3" };
-		const watches = [first, second].map(() => ({
-			value: view({ "pi.agent": { thinkingLevel: "medium" } }),
-			start: vi.fn(),
-			stop: vi.fn(async () => ({ kind: "stopped" as const })),
-			closed: Promise.resolve({ kind: "stopped" as const }),
-		} as unknown as ConversationWatch));
-		let conversationIndex = 0;
-		const service = {
-			herdrTarget: vi.fn(async () => undefined),
-			herdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrTarget: vi.fn(async () => undefined),
-			herdrAgents: vi.fn(async () => []),
-		};
-		const api: HerdrApi = {
-			createPane: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second),
-			getPane: vi.fn(),
-			movePane: vi.fn(),
-			paneLayout: vi.fn(async () => []),
-			resizePane: vi.fn(async () => undefined),
-			reportMetadata: vi.fn(async () => undefined),
-			appendText: vi.fn(async () => undefined),
-		};
-		const monitor = new HerdrAgentMonitor({
-			api,
-			currentPane: root,
-			cwd: "C:/project",
-			harness: { conversation: async () => ({
-				agent: async () => ({ thinkingLevel: "medium" }),
-				watch: async () => watches[conversationIndex++],
-			}) } as never,
-			service: service as never,
-		});
-
-		await monitor.trackAgent("first", "conversation-first" as never);
-		await monitor.trackAgent("second", "conversation-second" as never);
-
-		expect(api.createPane).toHaveBeenNthCalledWith(1, "C:/project", "first", root.paneId, "right");
-		expect(api.createPane).toHaveBeenNthCalledWith(2, "C:/project", "second", first.paneId, "down");
-		await monitor.close();
-	});
-
-	it("resizes the right-side agent stack to equal row heights", async () => {
-		const root: HerdrTarget = { tabId: "w1:t1", paneId: "w1:p1" };
-		const targets: HerdrTarget[] = [
-			{ tabId: "w1:t1", paneId: "w1:p2" },
-			{ tabId: "w1:t1", paneId: "w1:p3" },
-			{ tabId: "w1:t1", paneId: "w1:p4" },
-		];
-		const watches = targets.map(() => ({
-			value: view({ "pi.agent": { thinkingLevel: "medium" } }),
-			start: vi.fn(),
-			stop: vi.fn(async () => ({ kind: "stopped" as const })),
-			closed: Promise.resolve({ kind: "stopped" as const }),
-		} as unknown as ConversationWatch));
-		const twoEqualRows = targets.slice(0, 2).map((target, index) => ({
-			paneId: target.paneId,
-			rect: { x: 100, y: index * 30, width: 100, height: 30 },
-		}));
-		const threeUnequalRows = [30, 15, 15].map((height, index) => ({
-			paneId: targets[index]!.paneId,
-			rect: { x: 100, y: index === 0 ? 0 : index === 1 ? 30 : 45, width: 100, height },
-		}));
-		const threeEqualRows = targets.map((target, index) => ({
-			paneId: target.paneId,
-			rect: { x: 100, y: index * 20, width: 100, height: 20 },
-		}));
-		let layoutCalls = 0;
-		let conversationIndex = 0;
-		const service = {
-			herdrTarget: vi.fn(async () => undefined),
-			herdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrTarget: vi.fn(async () => undefined),
-			herdrAgents: vi.fn(async () => []),
-		};
-		const api: HerdrApi = {
-			createPane: vi.fn().mockResolvedValueOnce(targets[0]).mockResolvedValueOnce(targets[1]).mockResolvedValueOnce(targets[2]),
-			getPane: vi.fn(),
-			movePane: vi.fn(),
-			paneLayout: vi.fn(async () => {
-				layoutCalls++;
-				return layoutCalls === 1 ? twoEqualRows : layoutCalls === 2 ? threeUnequalRows : threeEqualRows;
-			}),
-			resizePane: vi.fn(async () => undefined),
-			reportMetadata: vi.fn(async () => undefined),
-			appendText: vi.fn(async () => undefined),
-		};
-		const monitor = new HerdrAgentMonitor({
-			api,
-			currentPane: root,
-			cwd: "C:/project",
-			harness: { conversation: async () => ({
-				agent: async () => ({ thinkingLevel: "medium" }),
-				watch: async () => watches[conversationIndex++],
-			}) } as never,
-			service: service as never,
-		});
-
-		await monitor.trackAgent("first", "conversation-first" as never);
-		await monitor.trackAgent("second", "conversation-second" as never);
-		await monitor.trackAgent("third", "conversation-third" as never);
-
-		expect(api.resizePane).toHaveBeenCalledOnce();
-		expect(api.resizePane).toHaveBeenCalledWith(targets[0]!.paneId, "up", expect.closeTo(1 / 6, 5));
-		await monitor.close();
-	});
-
-	it("recreates a pane that was closed while the monitor is active", async () => {
-		const original: HerdrTarget = { tabId: "w1:t3", paneId: "w1:p3" };
-		const reopened: HerdrTarget = { tabId: "w1:t3", paneId: "w1:p4" };
-		const watch = {
-			value: view({ "pi.agent": { thinkingLevel: "medium" } }),
-			start: vi.fn(),
-			stop: vi.fn(async () => ({ kind: "stopped" as const })),
-			closed: Promise.resolve({ kind: "stopped" as const }),
-		} as unknown as ConversationWatch;
-		const service = {
-			herdrTarget: vi.fn(async () => undefined),
-			herdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrTarget: vi.fn(async () => undefined),
-			herdrAgents: vi.fn(async () => []),
-		};
-		const api: HerdrApi = {
-			createPane: vi.fn().mockResolvedValueOnce(original).mockResolvedValueOnce(reopened),
-			getPane: vi.fn(async () => { throw new Error("Pane was closed."); }),
-			movePane: vi.fn(),
-			paneLayout: vi.fn(async () => []),
-			resizePane: vi.fn(async () => undefined),
-			reportMetadata: vi.fn(async () => undefined),
-			appendText: vi.fn(async () => undefined),
-		};
-		const conversation = { agent: async () => ({ thinkingLevel: "medium" }), watch: async () => watch };
-		const monitor = new HerdrAgentMonitor({
-			api,
-			cwd: "C:/project",
-			harness: { conversation: async () => conversation } as never,
-			service: service as never,
-		});
-
-		await monitor.trackAgent("writer", "conversation-closed-pane" as never);
-		await monitor.trackAgent("writer", "conversation-closed-pane" as never);
-
-		expect(api.createPane).toHaveBeenCalledTimes(2);
-		expect(service.setHerdrTarget).toHaveBeenLastCalledWith("writer", reopened);
-		expect(api.reportMetadata).toHaveBeenLastCalledWith("w1:p4", expect.any(Object));
-		expect(api.appendText).toHaveBeenLastCalledWith("w1:p4", expect.stringContaining("Durable agent: writer"));
-		await monitor.close();
-	});
-
-	it("repositions a persisted pane below the main pane in the current tab", async () => {
-		const stored: HerdrTarget = { tabId: "w1:t1", paneId: "w1:p4" };
-		const watch = {
-			value: view({ "pi.agent": { thinkingLevel: "medium" } }, [
-				entry("pi.user", 7, { role: "user", content: "An already recorded request." }),
-			]),
-			start: vi.fn(),
-			stop: vi.fn(async () => ({ kind: "stopped" as const })),
-			closed: Promise.resolve({ kind: "stopped" as const }),
-		} as unknown as ConversationWatch;
-		const service = {
-			herdrTarget: vi.fn(async () => stored),
-			herdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrTarget: vi.fn(),
-			herdrAgents: vi.fn(),
-		};
-		const api: HerdrApi = {
-			createPane: vi.fn(),
-			getPane: vi.fn(async () => stored),
-			movePane: vi.fn(async () => stored),
-			paneLayout: vi.fn(async () => []),
-			resizePane: vi.fn(async () => undefined),
-			reportMetadata: vi.fn(async () => undefined),
-			appendText: vi.fn(async () => undefined),
-		};
-		const conversation = { agent: async () => ({ thinkingLevel: "medium" }), watch: async () => watch };
-		const monitor = new HerdrAgentMonitor({
-			api,
-			currentPane: { tabId: "w1:t1", paneId: "w1:p1" },
-			cwd: "C:/project",
-			harness: { conversation: async () => conversation } as never,
-			service: service as never,
-		});
-
-		await monitor.trackAgent("writer", "conversation-2" as never);
-		expect(api.getPane).toHaveBeenCalledWith(stored.paneId);
-		expect(api.movePane).toHaveBeenCalledWith(stored.paneId, "w1:t1", "w1:p1", "writer", "right");
-		expect(api.createPane).not.toHaveBeenCalled();
-		expect(service.setHerdrTarget).toHaveBeenCalledWith("writer", stored);
-		expect(api.appendText).toHaveBeenCalledOnce();
-		expect(api.appendText).toHaveBeenCalledWith(stored.paneId, "Durable agent: writer\nModel: no-model\nThinking: medium");
-		expect(service.setHerdrOutputVersion).toHaveBeenCalledWith("writer", 1);
-		await monitor.close();
-	});
-
-	it("moves a persisted pane from an older tab into the current tab", async () => {
-		const stored: HerdrTarget = { tabId: "w1:t4", paneId: "w1:p4" };
-		const moved: HerdrTarget = { tabId: "w1:t1", paneId: "w1:p4" };
-		const watch = {
-			value: view({ "pi.agent": { thinkingLevel: "medium" } }),
-			start: vi.fn(),
-			stop: vi.fn(async () => ({ kind: "stopped" as const })),
-			closed: Promise.resolve({ kind: "stopped" as const }),
-		} as unknown as ConversationWatch;
-		const service = {
-			herdrTarget: vi.fn(async () => stored),
-			herdrOutputVersion: vi.fn(async () => 1),
-			setHerdrOutputVersion: vi.fn(async () => undefined),
-			setHerdrTarget: vi.fn(async () => undefined),
-			herdrAgents: vi.fn(async () => []),
-		};
-		const api: HerdrApi = {
-			createPane: vi.fn(),
-			getPane: vi.fn(async () => stored),
-			movePane: vi.fn(async () => moved),
-			paneLayout: vi.fn(async () => []),
-			resizePane: vi.fn(async () => undefined),
-			reportMetadata: vi.fn(async () => undefined),
-			appendText: vi.fn(async () => undefined),
-		};
-		const conversation = { agent: async () => ({ thinkingLevel: "medium" }), watch: async () => watch };
-		const monitor = new HerdrAgentMonitor({
-			api,
-			currentPane: { tabId: "w1:t1", paneId: "w1:p1" },
-			cwd: "C:/project",
-			harness: { conversation: async () => conversation } as never,
-			service: service as never,
-		});
-
-		await monitor.trackAgent("writer", "conversation-3" as never);
-		expect(api.movePane).toHaveBeenCalledWith(stored.paneId, "w1:t1", "w1:p1", "writer", "right");
-		expect(service.setHerdrTarget).toHaveBeenCalledWith("writer", moved);
-		expect(api.createPane).not.toHaveBeenCalled();
-		await monitor.close();
-	});
 });

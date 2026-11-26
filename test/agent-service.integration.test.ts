@@ -9,6 +9,9 @@ import {
 	AgentDoc,
 	AssistantEntry,
 	createRegistry,
+	defineTask,
+	LiveDoc,
+	UserEntry,
 	Harness,
 	type ModelRef,
 	UsageDoc,
@@ -88,6 +91,222 @@ async function setup(
 }
 
 describe("AgentService durable lifecycle", () => {
+	it("persists the per-root pane creation guard and keeps unchanged reads/writes silent", async () => {
+		const { service, harness, root } = await setup([]);
+		expect(await service.herdrPaneCreationPending()).toBe(false);
+		await root.commit(async (tx) => {
+			const state = await tx.doc(SubagentsDoc, root.id);
+			delete state["herdrPaneCreationPending" as string];
+		}, BACKGROUND_CONTEXT);
+		expect(await service.herdrPaneCreationPending()).toBe(false);
+		await root.commit(async (tx) => {
+			(await tx.doc(SubagentsDoc, root.id)).herdrPaneCreationPending = null;
+		}, BACKGROUND_CONTEXT);
+		expect(await service.herdrPaneCreationPending()).toBe(false);
+		await service.setHerdrPaneCreationPending(true);
+		expect(await service.herdrPaneCreationPending()).toBe(true);
+		await expect(harness.snapshot(SubagentsDoc, root.id, BACKGROUND_CONTEXT))
+			.resolves.toMatchObject({ herdrPaneCreationPending: true });
+		const advance = vi.fn();
+		const observation = await harness.observeDoc(SubagentsDoc, root.id, { advance, end: () => undefined }, BACKGROUND_CONTEXT);
+		try {
+			for (let index = 0; index < 3; index++) {
+				expect(await service.herdrPaneCreationPending()).toBe(true);
+				await service.setHerdrPaneCreationPending(true);
+				await service.herdrDisplayAgents();
+			}
+			expect(advance).not.toHaveBeenCalled();
+			await service.setHerdrPaneCreationPending(false);
+			expect(await service.herdrPaneCreationPending()).toBe(false);
+			expect(advance).toHaveBeenCalledTimes(1);
+			await service.setHerdrPaneCreationPending(false);
+			expect(advance).toHaveBeenCalledTimes(1);
+		} finally {
+			observation?.detach();
+		}
+	});
+
+	it("atomically completes pane creation with its target and resets output versions only on reassignment", async () => {
+		const { service, harness, root } = await setup(["Done."]);
+		const spawned = await service.spawn("pane-owner", undefined, "Finish.");
+		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+		await service.setHerdrPaneCreationPending(true);
+		await service.setHerdrOutputVersion("pane-owner", 17);
+		const target = { tabId: "tab", paneId: "first-pane" };
+		const observed: unknown[] = [];
+		const observation = await harness.observeDoc(SubagentsDoc, root.id, {
+			advance: (call) => { if (call.kind === "value") observed.push(call.value); },
+			end: () => undefined,
+		}, BACKGROUND_CONTEXT);
+		try {
+			await service.setHerdrTarget("pane-owner", target, true);
+			expect(observed).toHaveLength(1);
+			expect(observed[0]).toMatchObject({
+				herdrPaneCreationPending: false,
+				agents: { "pane-owner": { herdrTarget: target, herdrOutputVersion: null } },
+			});
+		} finally {
+			observation?.detach();
+		}
+		await service.setHerdrOutputVersion("pane-owner", 18);
+		await service.setHerdrTarget("pane-owner", { ...target });
+		expect(await service.herdrOutputVersion("pane-owner")).toBe(18);
+		await service.setHerdrPaneCreationPending(true);
+		await service.setHerdrTarget("pane-owner", { tabId: "tab", paneId: "replacement-pane" });
+		expect(await service.herdrOutputVersion("pane-owner")).toBeUndefined();
+		expect(await service.herdrPaneCreationPending()).toBe(true);
+		await service.setHerdrOutputVersion("pane-owner", 19);
+		await service.setHerdrTarget("pane-owner", { tabId: "moved-tab", paneId: "replacement-pane" });
+		expect(await service.herdrOutputVersion("pane-owner")).toBeUndefined();
+		await service.setHerdrTarget("pane-owner", undefined, true);
+		expect(await service.herdrPaneCreationPending()).toBe(true);
+		await expect(service.setHerdrTarget("missing-agent", target, true)).rejects.toThrow(/No managed agent/);
+		expect(await service.herdrPaneCreationPending()).toBe(true);
+	});
+
+	it("orders new work by durable acceptance rather than registry insertion and leaves unchanged polls silent", async () => {
+		const { service, harness, root, faux } = await setup(["Initial first.", "Initial second."]);
+		const first = await service.spawn("first-registered", undefined, "Initial task.");
+		await harness.waitForTask(first.reporterTaskId, BACKGROUND_CONTEXT);
+		const second = await service.spawn("second-registered", undefined, "Initial task.");
+		await harness.waitForTask(second.reporterTaskId, BACKGROUND_CONTEXT);
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 2" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 2" }), { stopReason: "toolUse" }),
+		]);
+		const secondWork = await service.send("second-registered", "Accepted first.");
+		const firstWork = await service.send("first-registered", "Accepted second.");
+		const summaries = await service.herdrDisplayAgents();
+		expect(summaries.map(({ name }) => name)).toEqual(["first-registered", "second-registered"]);
+		expect(summaries.map(({ workOrder }) => workOrder)).toEqual([firstWork.reporterTaskId, secondWork.reporterTaskId]);
+		expect([...summaries].sort((a, b) => a.workOrder - b.workOrder).map(({ name }) => name))
+			.toEqual(["second-registered", "first-registered"]);
+		await vi.waitFor(async () => {
+			expect((await service.herdrDisplayAgents()).every(({ workStart }) => workStart !== undefined)).toBe(true);
+		});
+		const advance = vi.fn();
+		const observation = await harness.observeDoc(SubagentsDoc, root.id, { advance, end: () => undefined }, BACKGROUND_CONTEXT);
+		try {
+			for (let index = 0; index < 3; index++) await service.herdrDisplayAgents();
+			expect(advance).not.toHaveBeenCalled();
+		} finally {
+			observation?.detach();
+		}
+		await service.stopAll();
+	});
+
+	it("tracks undisplayed queued work, multiple steers, replay periods, and report-only idle", async () => {
+		const { service, harness, root, faux } = await setup([], 100_000);
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 1; printf ready" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Done with the shared work."),
+		]);
+		const first = await service.spawn("display-worker", undefined, "Begin work.");
+		const accepted = (await service.herdrDisplayAgents())[0]!;
+		expect(accepted).toMatchObject({ name: "display-worker", conversationId: first.conversationId, active: true });
+		expect(accepted.workKey).toEqual(expect.any(String));
+		expect(await service.herdrAgents()).toEqual([]);
+		const child = (await harness.conversation(first.conversationId, BACKGROUND_CONTEXT))!;
+		await vi.waitFor(async () => {
+			const live = await harness.snapshot(LiveDoc, child.id, BACKGROUND_CONTEXT);
+			expect(live?.tools?.length).toBe(1);
+		});
+		const running = (await service.herdrDisplayAgents())[0]!;
+		const inputs = (await child.entries({ order: "ascending" }, 100, undefined, BACKGROUND_CONTEXT)).items.filter(UserEntry.is);
+		expect(running.workStart).toBe(inputs[0]!.id);
+		expect(running.workKey).toBe(accepted.workKey);
+		expect(running.workOrder).toBe(first.reporterTaskId);
+
+		const steers = await Promise.all([
+			service.send("display-worker", "First steer."),
+			service.send("display-worker", "Second steer."),
+		]);
+		expect((await service.herdrDisplayAgents())[0]).toEqual(running);
+		await Promise.all([first, ...steers].map(({ reporterTaskId }) => harness.waitForTask(reporterTaskId, BACKGROUND_CONTEXT)));
+		expect(await service.pendingReports()).toHaveLength(3);
+		expect((await service.herdrDisplayAgents())[0]).toEqual({ ...running, active: false });
+
+		faux.setResponses([fauxAssistantMessage("x".repeat(500))]);
+		const next = await service.send("display-worker", "A new work period.");
+		await vi.waitFor(async () => {
+			const summary = (await service.herdrDisplayAgents())[0]!;
+			expect(summary.workKey).not.toBe(running.workKey);
+			expect(summary.workStart).toBeGreaterThan(running.workStart!);
+		});
+		await service.stop("display-worker");
+		await harness.waitForTask(next.reporterTaskId, BACKGROUND_CONTEXT);
+		expect((await service.herdrDisplayAgents())[0]?.active).toBe(false);
+		await expect(harness.snapshot(SubagentsDoc, root.id, BACKGROUND_CONTEXT)).resolves.toMatchObject({
+			agents: { "display-worker": { workReporterTaskIds: [next.reporterTaskId] } },
+		});
+	}, 10_000);
+
+	it("migrates active legacy markers from the run, then retains them after stop", async () => {
+		const { service, harness, root } = await setup(["x".repeat(500)], 1);
+		const spawned = await service.spawn("legacy-display", undefined, "Legacy running work.");
+		await vi.waitFor(async () => expect((await service.status("legacy-display")).active).toBe(true));
+		const live = await harness.snapshot(LiveDoc, spawned.conversationId, BACKGROUND_CONTEXT);
+		await root.commit(async (tx) => {
+			const agent = (await tx.doc(SubagentsDoc, root.id)).agents["legacy-display"]!;
+			for (const field of ["workKey", "workStart", "workReporterTaskIds"]) delete agent[field];
+		}, BACKGROUND_CONTEXT);
+		const migrated = (await service.herdrDisplayAgents())[0]!;
+		expect(migrated).toMatchObject({ active: true, workStart: live!.run!.first });
+		expect(migrated.workKey).toMatch(/^legacy:/);
+		expect(migrated.workOrder).toBe(spawned.reporterTaskId);
+		expect((await service.herdrDisplayAgents())[0]).toEqual(migrated);
+		await service.stop("legacy-display");
+		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+		expect((await service.herdrDisplayAgents())[0]).toEqual({ ...migrated, active: false });
+	});
+
+	it("does not mistake a live report-only task for queued input, and clears pane metadata", async () => {
+		const { service, harness, root, durableRegistry } = await setup(["Finished."]);
+		const spawned = await service.spawn("report-only", undefined, "Finish this request.");
+		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+		const original = (await harness.getTask(spawned.reporterTaskId, BACKGROUND_CONTEXT))!;
+		// Simulate a reporter paused after submission settlement but before its terminal commit.
+		const WaitingReporter = defineTask<typeof original.input, { phase: "wait" }, null>({
+			name: "test.report-only",
+			version: 1,
+			initial: () => ({ phase: "wait" }),
+			phases: { wait: (_task, runtime, context) => runtime.commit(() => ({
+				status: "sleeping", until: Date.now() + 60_000, checkpoint: { phase: "wait" },
+			}), context) },
+			abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+		});
+		durableRegistry.install({ name: "test.report-only", tasks: [WaitingReporter] });
+		await root.commit(async (tx) => {
+			const state = await tx.doc(SubagentsDoc, root.id);
+			const taskId = await tx.createTask(WaitingReporter, original.input, { ownership: { kind: "conversation" }, background: true });
+			state.agents["report-only"]!.workReporterTaskIds!.push(taskId);
+			state.agents["report-only"]!.reporterTaskIds.push(taskId);
+		}, BACKGROUND_CONTEXT);
+		expect((await service.herdrDisplayAgents())[0]?.active).toBe(false);
+		expect(await service.pendingReports()).toHaveLength(1);
+		await service.setHerdrTarget("report-only", { tabId: "tab", paneId: "pane" });
+		await service.setHerdrOutputVersion("report-only", 42);
+		await service.setHerdrTarget("report-only", undefined);
+		expect(await service.herdrTarget("report-only")).toBeUndefined();
+		expect(await service.herdrOutputVersion("report-only")).toBeUndefined();
+		expect(await service.herdrAgents()).toEqual([]);
+		expect(await service.herdrDisplayAgents()).toHaveLength(1);
+
+		// An accepted request still waiting to submit is eligible even with no child run.
+		const queuedTaskId = await root.commit(async (tx) => {
+			const state = await tx.doc(SubagentsDoc, root.id);
+			const taskId = await tx.createTask(WaitingReporter, { requestId: "not-submitted-yet" }, {
+				ownership: { kind: "conversation" }, background: true,
+			});
+			state.agents["report-only"]!.workReporterTaskIds!.push(taskId);
+			return taskId;
+		}, BACKGROUND_CONTEXT);
+		expect((await service.herdrDisplayAgents())[0]?.active).toBe(true);
+		await harness.abortTask(queuedTaskId, BACKGROUND_CONTEXT);
+		await harness.waitForTask(queuedTaskId, BACKGROUND_CONTEXT);
+		expect((await service.herdrDisplayAgents())[0]?.active).toBe(false);
+	});
+
 	it("captures request-local tool activity when a child submission ends unanswered", async () => {
 		const telemetry = new InMemoryTelemetryContext();
 		const { service, harness, faux, directory } = await setup([], 100_000, { entries: new Map(), valid: new Map() }, telemetry);
@@ -100,6 +319,7 @@ describe("AgentService durable lifecycle", () => {
 
 		const spawned = await service.spawn("failing-worker", undefined, "Read the file, then summarize it.");
 		await harness.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
+		expect((await service.herdrDisplayAgents())[0]).toMatchObject({ active: false, workStart: expect.any(Number) });
 
 		const executionSpan = telemetry.getSpans().find((span) =>
 			span.name === "durable_subagents.execution"
@@ -431,6 +651,7 @@ describe("AgentService durable lifecycle", () => {
 			{ name: "second-worker", active: false },
 		]);
 		expect(await service.pendingReports()).toEqual([]);
+		expect((await service.herdrDisplayAgents()).every(({ active }) => !active)).toBe(true);
 		expect((await service.status("first-worker")).outgoingCount).toBe(0);
 	});
 
@@ -484,6 +705,9 @@ describe("AgentService durable lifecycle", () => {
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
 		expect((await service.status("resumable")).active).toBe(true);
+		await service.setHerdrPaneCreationPending(true);
+		const displayBeforeRestart = (await service.herdrDisplayAgents())[0]!;
+		expect(displayBeforeRestart.workStart).toEqual(expect.any(Number));
 
 		const openIndex = openHarnesses.indexOf(harness);
 		if (openIndex >= 0) openHarnesses.splice(openIndex, 1);
@@ -509,6 +733,7 @@ describe("AgentService durable lifecycle", () => {
 			parentModel,
 			parentThinking: "off",
 		});
+		expect(await reopenedService.herdrPaneCreationPending()).toBe(true);
 		reopened.resume();
 		await reopened.waitForTask(spawned.reporterTaskId, BACKGROUND_CONTEXT);
 
@@ -516,6 +741,10 @@ describe("AgentService durable lifecycle", () => {
 			conversationId: spawned.conversationId,
 			incomingCount: 1,
 		});
+		expect((await reopenedService.herdrDisplayAgents())[0]).toEqual({ ...displayBeforeRestart, active: false });
+		expect(await reopenedService.herdrPaneCreationPending()).toBe(true);
+		await reopenedService.setHerdrPaneCreationPending(false);
+		expect(await reopenedService.herdrPaneCreationPending()).toBe(false);
 		const recoveredReports = await reopenedService.pendingReports();
 		expect(recoveredReports).toEqual([
 			expect.objectContaining({ agentName: "resumable", text: expect.any(String), delivered: false }),

@@ -16,7 +16,7 @@ Pi Durable Subagents is a Pi extension for managing named, reusable agents backe
 - **Choose how to work.** Ask Pi to delegate through the `subagent` tool, or manage agents yourself with `/agents`.
 - **See what's happening.** Track active work, requests, usage, and costs in the Pi footer and with agent status commands.
 - **Configure agents with presets.** Set an agent's tool allowlist, model, and thinking level.
-- **Optionally use live Herdr panes.** In a Herdr-managed terminal, agents can each get a separate pane that shows their activity.
+- **Optionally use live Herdr panes.** In a Herdr-managed terminal, a bounded pool of panes shows agent activity without limiting how many agents can work.
 
 ## How it works
 
@@ -92,6 +92,8 @@ The `subagent` tool supports `spawn`, `send`, `list`, `status`, `stop`, `stop-al
 /agents stop --all
 /agents stats
 /agents footer alwaysOn|activity
+/agents panes
+/agents panes <K>
 ```
 
 Names containing spaces can be quoted. If a spawn name matches a preset ID, that preset is used by default; `--preset` can select a different preset while retaining the chosen instance name. A missing preset is an unconfigured, all-tools agent. Name collisions—including with idle agents—receive a numeric suffix. Agents remain registered after completing or stopping work, and later `send` operations reuse their conversation. A send to busy work is steered into the existing agent. `stop --all` affects managed work only, never the main Pi agent.
@@ -140,11 +142,17 @@ The display refreshes about once a second while agents are running. Context usag
 
 ### Herdr live agent panes
 
-When the extension runs in a Herdr-managed pane, each newly spawned agent gets its own non-focused split pane in the current Herdr tab. The first agent splits to the right of the main pane; each additional agent splits below the last agent within that right-side area. This preserves the main pane's width while stacking agents in rows instead of creating more thin columns, and the right-side rows are resized to equal heights as agents are added. Each pane is associated with its durable agent, so sending more work reuses it; the association is persisted with the managed-agent registry and restored when the Pi session resumes. Panes remain open after an agent finishes.
+When the extension runs in a Herdr-managed pane, it automatically shares a bounded pool of non-focused agent-display panes in the current tab. **The default budget is 3 panes.** This limits displays, not agents: overflow agents keep executing and reporting normally, without creating overflow tabs. The main Pi pane and unrelated terminals do not count toward the budget.
 
-Each pane gets an identity header with the agent name, configured model, and thinking level. Thereafter the terminal is append-only: full user inputs, every assistant text message (not thinking content), and completed tool calls with the tool name, compact arguments (up to 500 characters), and finished/failed status. Tool results are not copied. Changes to an inherited model or thinking level are appended as configuration lines; the original header is not rewritten. Existing panes resume without replaying old transcript entries; on the first update after this change, the new identity header is appended once and its format version is persisted. Newly created panes start with a header and currently visible entries. Concurrent agents append to separate panes. Each pane uses a persistent renderer over a private local socket, so the Node bootstrap command is run once per pane rather than echoed for every transcript update. Existing managed-agent panes are reflowed into an equally sized right-side stack in the current tab when the session resumes; a pane closed during a session is recreated on the next agent update.
+Use `/agents panes` to report the current budget and `/agents panes K` to set a nonnegative integer budget immediately. `/agents panes 0` removes owned displays without stopping agents or deleting their durable conversations. Increasing the budget admits waiting active agents immediately. Shrinking removes idle displays first, then the most recently assigned active displays; displaced agents keep their original waiting priority. The preference is runtime-only: it survives managed-session runtime recreation in the same extension instance, but resets to 3 on extension reload or Pi restart. Different Herdr tabs have independent budgets. **Only one display-managing main Pi session per Herdr tab is supported**; multiple managers sharing a tab are not coordinated.
 
-The integration is enabled only when `HERDR_ENV=1` and `HERDR_WORKSPACE_ID` are present and the `herdr` CLI is available; failures do not stop agent work.
+Displayed active agents retain their slots. Waiting active agents are admitted in arrival order, skipping agents that become idle before admission. An agent is eligible while it has executing or queued instructions; pending report delivery alone does not count. An idle pane retains its last output until another active agent needs the slot, with the longest-idle pane reused first. An undisplayed agent receiving more work joins the back of the queue, regardless of earlier pane ownership. There are no manual selection or pinning commands.
+
+Reassignment reuses the pane, clears both the screen and scrollback, shows the new agent's identity (name, model, and thinking level), and replays its current-task output before live updates continue. The old agent's history remains in its durable conversation, not in the reused display. Panes show user inputs, assistant text (not hidden thinking), and completed tool calls with compact arguments and success/failure status; tool results are not copied. A private local renderer socket avoids echoing bootstrap commands for every update.
+
+On resume/reload, tracked owned panes are reconciled to the budget, retaining eligible active displays first and idle displays only in spare slots. Excess legacy displays are closed without touching unrelated terminals or deleting agent state. Manually closing a display does not reduce the budget: active demand can recreate it, checked about once a second. Use `/agents panes K` to reduce the footprint instead. Panes are explicitly targeted without stealing focus.
+
+The integration is enabled only when `HERDR_ENV=1` and `HERDR_WORKSPACE_ID` are present and the `herdr` CLI is available. Display failures never stop agent work. Failed or uncertain pane operations are conservatively accounted for rather than risking extra replacements beyond the budget. A split is durably reserved before invoking Herdr; an unresolved split outcome suspends new pane creation even across reloads, until the reservation is explicitly resolved after inspection. There is no automatic reset on restart. Known-pane reconciliation can still retry, and a confirmed failure to start the CLI does not leave a reservation. Failures produce rate-limited visible warnings (at most one per 30 seconds), rather than notification flooding.
 
 ### Opt-in OpenTelemetry
 

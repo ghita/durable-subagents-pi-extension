@@ -34,6 +34,23 @@ A response from a managed agent delivered to the main agent. Count it when deliv
 A Pi session backed by a saved transcript path that can be reopened. Durable managed agents require this session type; temporary or transcript-less sessions are unsupported.
 _Avoid_: Durable session (when referring only to Pi's transcript)
 
+## Agent display
+
+**Agent-display pane**:
+A Herdr pane that shows a managed agent's activity. A managed agent can exist and work without an agent-display pane.
+
+**Tab pane budget**:
+The maximum number of agent-display panes in a Herdr tab, excluding the main Pi pane and unrelated terminals. It does not limit how many managed agents exist or are active.
+
+**Display slot**:
+A place within a tab's pane budget that can display one managed agent at a time. An idle agent can give way to another active agent without either agent being removed.
+
+**Display-eligible agent**:
+A managed agent with executing or queued instructions, whether or not it currently has a display slot. Pending report delivery alone does not make an agent display-eligible.
+
+**Agent work period**:
+An uninterrupted period during which a managed agent has executing or queued instructions. Additional steering instructions belong to that period until the agent has no work remaining.
+
 ## Agent diagnostics
 
 **Managed-agent telemetry**:

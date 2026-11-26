@@ -4,6 +4,7 @@
  * It listens on the per-pane Unix socket or Windows named pipe passed as argv[2].
  * The extension sends newline-delimited JSON: `ping` probes the bridge, while
  * `append` writes its text to stdout (inherited from the pane) before acknowledging.
+ * `reset` clears scrollback and the screen before a display slot changes occupants.
  * This keeps transcript contents off the pane's shell command line after startup.
  */
 const net = require("node:net");
@@ -50,10 +51,11 @@ function handleMessage(socket, line) {
 	if (message.type === "ping") {
 		return socket.end(JSON.stringify({ id: message.id, ok: true }) + "\n");
 	}
-	if (message.type !== "append" || typeof message.text !== "string") {
-		return socket.end(JSON.stringify({ id: message.id, ok: false, error: "invalid append message" }) + "\n");
+	if (message.type !== "reset" && (message.type !== "append" || typeof message.text !== "string")) {
+		return socket.end(JSON.stringify({ id: message.id, ok: false, error: "invalid output message" }) + "\n");
 	}
-	process.stdout.write(message.text, (error) => {
+	const text = message.type === "reset" ? "\x1b[3J\x1b[2J\x1b[H" : message.text;
+	process.stdout.write(text, (error) => {
 		socket.end(JSON.stringify({ id: message.id, ok: error === null || error === undefined, ...(error ? { error: error.message } : {}) }) + "\n");
 	});
 }

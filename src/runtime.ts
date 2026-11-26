@@ -32,6 +32,7 @@ export interface ManagedSessionRuntime {
 	service: AgentService;
 	herdrMonitor?: HerdrAgentMonitor;
 	telemetry?: TelemetryContext;
+	reportDisplayError(error: unknown): void;
 	close(): Promise<void>;
 }
 
@@ -48,10 +49,11 @@ function selectedThinking(pi: ExtensionAPI, context: ExtensionContext): ModelThi
 export async function openManagedSessionRuntime(
 	pi: ExtensionAPI,
 	context: ExtensionContext,
+	paneLimit = 3,
 ): Promise<ManagedSessionRuntime> {
 	const optInTelemetry: OptInTelemetry | undefined = createOptInTelemetry();
 	try {
-		return await initializeManagedSessionRuntime(pi, context, optInTelemetry);
+		return await initializeManagedSessionRuntime(pi, context, optInTelemetry, paneLimit);
 	} catch (error) {
 		await optInTelemetry?.close();
 		throw error;
@@ -62,6 +64,7 @@ async function initializeManagedSessionRuntime(
 	pi: ExtensionAPI,
 	context: ExtensionContext,
 	optInTelemetry: OptInTelemetry | undefined,
+	paneLimit: number,
 ): Promise<ManagedSessionRuntime> {
 	const telemetry = optInTelemetry?.context;
 	const sessionFile = requireSessionFile(context.sessionManager.getSessionFile());
@@ -110,6 +113,21 @@ async function initializeManagedSessionRuntime(
 	});
 	await service.updateInherited(parentModel, parentThinking);
 
+	let lastDisplayWarning = -Infinity;
+	const reportDisplayError = (error: unknown): void => {
+		// One warning per 30 seconds across all panes, including refresh failures.
+		if (Date.now() - lastDisplayWarning < 30_000) return;
+		lastDisplayWarning = Date.now();
+		const message = `Managed-agent display failed (agent work continues): ${error instanceof Error ? error.message : String(error)}`;
+		try {
+			if (context.hasUI) context.ui.notify(message, "warning");
+			else console.error(message);
+		} catch {
+			// A detached/stale UI must not turn an optional display failure into a
+			// rejected refresh tail or skip Durable/telemetry shutdown.
+			try { console.error(message); } catch { /* No operational output sink remains. */ }
+		}
+	};
 	const herdr = herdrApiFromEnvironment();
 	const herdrMonitor = herdr === undefined
 		? undefined
@@ -119,17 +137,25 @@ async function initializeManagedSessionRuntime(
 			cwd,
 			harness,
 			service,
-			onError: () => undefined,
+			paneLimit,
+			onError: reportDisplayError,
 		});
 	if (herdrMonitor !== undefined) {
 		try {
 			await herdrMonitor.attachPersistedAgents();
-		} catch {
-			// Herdr pane restoration is optional and must not affect durable work.
+		} catch (error) {
+			reportDisplayError(error);
 		}
 	}
 	let drainTail: Promise<void> = Promise.resolve();
 	let isClosed = false;
+	let refreshInFlight: Promise<void> | undefined;
+	const refreshDisplay = (): void => {
+		if (isClosed || herdrMonitor === undefined || refreshInFlight !== undefined) return;
+		refreshInFlight = herdrMonitor.refresh()
+			.catch(reportDisplayError)
+			.finally(() => { refreshInFlight = undefined; });
+	};
 	const drainReports = (): void => {
 		drainTail = drainTail
 			.then(async () => {
@@ -163,6 +189,8 @@ async function initializeManagedSessionRuntime(
 		SubagentsDoc,
 		root.id,
 		{
+			// Display reconciliation persists pane metadata to this same document.
+			// Poll separately rather than feeding those writes back into refresh.
 			advance: () => drainReports(),
 			end: () => undefined,
 		},
@@ -170,6 +198,8 @@ async function initializeManagedSessionRuntime(
 	);
 	if (observation === undefined) throw new Error("Unable to observe the managed-agent registry document.");
 
+	const displayTimer = herdrMonitor === undefined ? undefined : setInterval(refreshDisplay, 1_000);
+	displayTimer?.unref();
 	harness.resume();
 	drainReports();
 
@@ -179,14 +209,17 @@ async function initializeManagedSessionRuntime(
 		service,
 		herdrMonitor,
 		telemetry,
+		reportDisplayError,
 		async close() {
 			if (isClosed) return;
 			isClosed = true;
+			clearInterval(displayTimer);
 			observation.detach();
+			await refreshInFlight;
 			try {
 				await herdrMonitor?.close();
-			} catch {
-				// Optional pane cleanup must not prevent Durable or telemetry shutdown.
+			} catch (error) {
+				reportDisplayError(error);
 			}
 			await drainTail;
 			try {

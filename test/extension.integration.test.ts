@@ -9,6 +9,26 @@ import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import durableSubagents from "../src/index.ts";
 
+const display = vi.hoisted(() => ({
+	options: undefined as any,
+	refresh: vi.fn(async (): Promise<void> => undefined),
+	attach: vi.fn(async () => undefined),
+	track: vi.fn(async () => undefined),
+	close: vi.fn(async () => undefined),
+	setLimit: vi.fn(async (_limit: number) => undefined),
+}));
+vi.mock("../src/herdr-monitor.ts", () => ({
+	herdrApiFromEnvironment: () => ({ api: {}, currentPane: "main" }),
+	HerdrAgentMonitor: class {
+		constructor(options: any) { display.options = options; }
+		attachPersistedAgents = display.attach;
+		trackAgent = display.track;
+		refresh = display.refresh;
+		setPaneLimit = display.setLimit;
+		close = display.close;
+	},
+}));
+
 const directories: string[] = [];
 let priorHerdrEnv: string | undefined;
 let priorHerdrWorkspaceId: string | undefined;
@@ -118,6 +138,17 @@ describe("Pi extension integration", () => {
 		await handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, context);
 		expect(commands.has("agents")).toBe(true);
 		expect(tools.has("durable_subagent")).toBe(true);
+		expect(display.options.paneLimit).toBe(3);
+		expect(display.attach).toHaveBeenCalledOnce();
+		// Display errors are visible but rate-limited independently of durable work.
+		contextState.hasUI = true;
+		display.options.onError(new Error("display unavailable"), "analyst");
+		display.options.onError(new Error("display unavailable again"), "other");
+		expect(notifications.filter((message) => message.includes("Managed-agent display failed"))).toHaveLength(1);
+		const initialRefreshes = display.refresh.mock.calls.length;
+		display.refresh.mockRejectedValueOnce(new Error("poll temporarily unavailable"));
+		await vi.waitFor(() => expect(display.refresh.mock.calls.length).toBeGreaterThan(initialRefreshes + 1), { timeout: 3_000 });
+		expect(notifications.filter((message) => message.includes("Managed-agent display failed"))).toHaveLength(1);
 
 		const tool = tools.get("durable_subagent")!;
 		expect(tool.promptSnippet).toContain("acknowledgments, not results");
@@ -192,6 +223,22 @@ describe("Pi extension integration", () => {
 		await handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "resume" }, context);
 		await commands.get("agents")!.handler("list", commandContext);
 		expect(notifications.at(-1)).toContain("analyst");
-		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, context);
+		// Even a stale UI throwing while a display close fails must not poison
+		// runtime shutdown (Durable and telemetry still need their cleanup).
+		display.close.mockRejectedValueOnce(new Error("display close unavailable"));
+		const originalNotify = ui.notify;
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		ui.notify = () => { throw new Error("UI detached"); };
+		try {
+			await expect(handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, context)).resolves.toBeUndefined();
+			expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("display close unavailable"));
+		} finally {
+			ui.notify = originalNotify;
+			consoleError.mockRestore();
+		}
+		expect(display.close).toHaveBeenCalledTimes(2);
+		const refreshCount = display.refresh.mock.calls.length;
+		await new Promise((resolve) => setTimeout(resolve, 1_100));
+		expect(display.refresh).toHaveBeenCalledTimes(refreshCount);
 	});
 });

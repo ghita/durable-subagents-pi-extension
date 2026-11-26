@@ -1,6 +1,7 @@
 export type AgentsCommand =
 	| { action: "help" | "presets" | "list" | "stats" }
 	| { action: "footer"; alwaysOn: boolean }
+	| { action: "panes"; limit?: number }
 	| { action: "status"; name: string }
 	| { action: "send"; name: string; message: string }
 	| { action: "stop"; name: string }
@@ -111,6 +112,14 @@ export function parseAgentsCommand(source: string): AgentsCommand {
 	if (action === "help" || action === "presets" || action === "list" || action === "stats") {
 		if (tail.length !== 0) throw new Error(`Unexpected arguments after "${action}".`);
 		return { action };
+	}
+	if (action === "panes") {
+		if (tail.length === 0) return { action };
+		const limit = Number(tail[0]);
+		if (tail.length !== 1 || !/^\d+$/.test(tail[0]!) || !Number.isSafeInteger(limit)) {
+			throw new Error("Usage: /agents panes [K] - K must be a nonnegative safe integer.");
+		}
+		return { action, limit };
 	}
 	if (action === "footer") {
 		if (tail.length !== 1 || (tail[0] !== "alwaysOn" && tail[0] !== "activity")) {

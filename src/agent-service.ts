@@ -15,6 +15,7 @@ import {
 	type Harness,
 	type ModelRef,
 	type TaskId,
+	type Tx,
 	UsageDoc,
 	type UsageState,
 } from "@earendil-works/pi-durable";
@@ -89,6 +90,16 @@ export interface HerdrTarget {
 	paneId: string;
 }
 
+export interface HerdrDisplayAgent {
+	name: string;
+	conversationId: ConversationId;
+	active: boolean;
+	/** Durable acceptance order of this work period's first reporter, independent of registry order. */
+	workOrder: number;
+	workStart?: EntryId;
+	workKey?: string;
+}
+
 export interface AgentServiceOptions {
 	harness: Harness;
 	root: Conversation;
@@ -128,6 +139,48 @@ function ensureStateShape(state: SubagentsState): SubagentsState {
 	state.agents ??= {};
 	state.reports ??= {};
 	return state;
+}
+
+/** Read submission state, not reporter liveness: a reporter can be preparing a report long after work ends.
+ * Retain every input in a continuous work period, since several steers may settle with the same answer.
+ * Called on the Session line so send and display polling cannot race period assignment.
+ */
+async function refreshWork(tx: Tx, agent: ManagedAgentRecord): Promise<boolean> {
+	const live = await tx.doc(LiveDoc, agent.conversationId);
+	const legacy = agent.workReporterTaskIds == null;
+	const requests = await Promise.all((agent.workReporterTaskIds ?? agent.reporterTaskIds ?? []).map(async (taskId) => {
+		const task = await tx.task(taskId);
+		const requestId = task?.input !== null && typeof task?.input === "object"
+			&& !Array.isArray(task.input) && typeof task.input.requestId === "string" ? task.input.requestId : undefined;
+		const submission = requestId === undefined ? undefined : await tx.submissionByRequest(agent.conversationId, requestId);
+		const active = submission === undefined
+			? task !== undefined && !task.abortRequested && task.state.status !== "terminal" && task.state.status !== "completing"
+			: submission.status === "queued" || submission.status === "placed";
+		return { taskId, submission, active };
+	}));
+	const active = live.run !== undefined || requests.some((request) => request.active);
+	if (legacy) {
+		// Recover in-flight legacy work from its actual run boundary. For idle legacy agents, submissions
+		// sharing the latest answer are the best available durable grouping (never use pending reports).
+		const latest = requests.at(-1)?.submission;
+		const relevant = active ? requests.filter((request) => request.active) : requests.filter(({ submission }) =>
+			submission !== undefined && latest !== undefined && (submission.id === latest.id
+				|| (latest.status === "done" && submission.status === "done" && submission.answer === latest.answer)),
+		);
+		agent.workReporterTaskIds = relevant.map(({ taskId }) => taskId);
+		const identity = relevant[0]?.taskId ?? live.run?.first ?? live.run?.taskId;
+		agent.workKey = identity === undefined ? null : `legacy:${identity}`;
+		const entries = relevant.flatMap(({ submission }) => submission?.entry === undefined ? [] : [submission.entry]);
+		if (live.run?.first !== undefined) entries.push(live.run.first);
+		agent.workStart = entries.sort((a, b) => a - b)[0] ?? null;
+	} else {
+		const entries = requests.flatMap(({ submission }) => submission?.entry === undefined ? [] : [submission.entry]);
+		if (agent.workStart != null) entries.push(agent.workStart);
+		if (live.run?.first !== undefined) entries.push(live.run.first);
+		const workStart = entries.sort((a, b) => a - b)[0] ?? null;
+		if (agent.workStart !== workStart) agent.workStart = workStart;
+	}
+	return active;
 }
 
 function toolRegistrations(names: readonly string[] | undefined) {
@@ -193,6 +246,7 @@ export class AgentService {
 		return {
 			agents: { ...(snapshot?.agents ?? {}) },
 			reports: { ...(snapshot?.reports ?? {}) },
+			herdrPaneCreationPending: snapshot?.herdrPaneCreationPending ?? false,
 		};
 	}
 
@@ -257,6 +311,9 @@ export class AgentService {
 						latestTask: message,
 						fresh: true,
 						reporterTaskIds: [reporterTaskId],
+						workReporterTaskIds: [reporterTaskId],
+						workKey: operationId,
+						workStart: null,
 					};
 					return { name, conversationId: child.id, reporterTaskId };
 				}, context);
@@ -285,6 +342,12 @@ export class AgentService {
 					const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
 					const agent = Object.hasOwn(state.agents, agentName) ? state.agents[agentName] : undefined;
 					if (agent === undefined) throw new Error(`No managed agent named "${agentName}".`);
+					const continuing = await refreshWork(tx, agent);
+					if (!continuing) {
+						agent.workKey = operationId;
+						agent.workStart = null;
+						agent.workReporterTaskIds = [];
+					}
 					agent.incomingCount = (agent.incomingCount ?? 0) + 1;
 					agent.latestTask = message;
 					agent.fresh = false;
@@ -302,6 +365,7 @@ export class AgentService {
 						{ ownership: { kind: "conversation" }, background: true },
 					);
 					agent.reporterTaskIds.push(reporterTaskId);
+					agent.workReporterTaskIds!.push(reporterTaskId);
 					return { reporterTaskId, requestId: `managed-agent:${operationId}`, conversationId: agent.conversationId };
 				}, context);
 			},
@@ -420,6 +484,18 @@ export class AgentService {
 		return counts;
 	}
 
+	/** Persisted fail-safe for a split whose target may not yet be durably associated. Never clears itself. */
+	async herdrPaneCreationPending(): Promise<boolean> {
+		return (await this.#state()).herdrPaneCreationPending === true;
+	}
+
+	async setHerdrPaneCreationPending(pending: boolean): Promise<void> {
+		await this.root.commit(async (tx) => {
+			const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
+			if (state.herdrPaneCreationPending !== pending) state.herdrPaneCreationPending = pending;
+		}, BACKGROUND_CONTEXT);
+	}
+
 	async herdrTarget(name: string): Promise<HerdrTarget | undefined> {
 		const state = await this.#state();
 		const target = state.agents[validateAgentName(name)]?.herdrTarget;
@@ -433,13 +509,40 @@ export class AgentService {
 			.map(([name, agent]) => ({ name, conversationId: agent.conversationId }));
 	}
 
-	async setHerdrTarget(name: string, target: HerdrTarget): Promise<void> {
+	/** All registered agents, whether or not they have ever owned a display pane. */
+	async herdrDisplayAgents(): Promise<HerdrDisplayAgent[]> {
+		return this.root.commit(async (tx) => {
+			const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
+			const summaries: HerdrDisplayAgent[] = [];
+			for (const [name, agent] of Object.entries(state.agents)) {
+				const active = await refreshWork(tx, agent);
+				summaries.push({ name, conversationId: agent.conversationId, active,
+					workOrder: agent.workReporterTaskIds?.[0] ?? agent.reporterTaskIds?.at(-1) ?? agent.conversationId,
+					...(agent.workStart == null ? {} : { workStart: agent.workStart }),
+					...(agent.workKey == null ? {} : { workKey: agent.workKey }),
+				});
+			}
+			return summaries;
+		}, BACKGROUND_CONTEXT);
+	}
+
+	async setHerdrTarget(name: string, target: HerdrTarget | undefined, completePaneCreation = false): Promise<void> {
 		const agentName = validateAgentName(name);
 		await this.root.commit(async (tx) => {
 			const state = ensureStateShape(await tx.doc(SubagentsDoc, this.root.id));
 			const agent = Object.hasOwn(state.agents, agentName) ? state.agents[agentName] : undefined;
 			if (agent === undefined) throw new Error(`No managed agent named "${agentName}".`);
-			agent.herdrTarget = { tabId: target.tabId, paneId: target.paneId };
+			if (target === undefined) {
+				if (agent.herdrTarget !== null) agent.herdrTarget = null;
+				if (agent.herdrOutputVersion !== null) agent.herdrOutputVersion = null;
+			} else {
+				if (agent.herdrTarget?.tabId !== target.tabId || agent.herdrTarget?.paneId !== target.paneId) {
+					agent.herdrTarget = { tabId: target.tabId, paneId: target.paneId };
+					agent.herdrOutputVersion = null;
+				}
+				// Complete the reservation atomically with the durable association, never before it.
+				if (completePaneCreation && state.herdrPaneCreationPending !== false) state.herdrPaneCreationPending = false;
+			}
 		}, BACKGROUND_CONTEXT);
 	}
 
