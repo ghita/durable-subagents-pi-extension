@@ -38,7 +38,7 @@ The main-agent/sub-agent communication design was inspired by [Pi's background s
 
 ## Install
 
-Install from npm (once published):
+Install from npm:
 
 ```sh
 pi install npm:pi-durable-subagents-extension
@@ -47,7 +47,7 @@ pi install npm:pi-durable-subagents-extension
 Or install directly from GitHub:
 
 ```sh
-pi install git:github.com/ghita/durable-subagents
+pi install git:github.com/ghita/durable-subagents-pi-extension
 ```
 
 For local development, load the extension directly:

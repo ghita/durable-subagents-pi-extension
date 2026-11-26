@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ghita/durable-subagents.git"
+    "url": "git+https://github.com/ghita/durable-subagents-pi-extension.git"
   },
-  "homepage": "https://github.com/ghita/durable-subagents#readme",
+  "homepage": "https://github.com/ghita/durable-subagents-pi-extension#readme",
   "bugs": {
-    "url": "https://github.com/ghita/durable-subagents/issues"
+    "url": "https://github.com/ghita/durable-subagents-pi-extension/issues"
   },
   "files": [
     "src",
