@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import {
 	ROOT_CONTEXT,
 	SpanKind,
@@ -36,6 +37,7 @@ import type {
 
 export const MAX_PAYLOAD_BYTES = 64 * 1024;
 const TELEMETRY_SCOPE = "pi.durable-subagents";
+const TELEMETRY_SCOPE_VERSION: string = createRequire(import.meta.url)("../package.json").version;
 const TRACEPARENT = /^([\da-f]{2})-([\da-f]{32})-([\da-f]{16})-([\da-f]{2})$/;
 
 export interface OptInTelemetry {
@@ -385,8 +387,8 @@ export function createOptInTelemetry(
 			exportTimeoutMillis: metricOptions.timeoutMillis,
 		});
 		const meterProvider = new MeterProvider({ resource, readers: [metricReader] });
-		const tracer = traceProvider.getTracer(TELEMETRY_SCOPE, "0.1.0");
-		const metrics = createTelemetryMetrics(meterProvider.getMeter(TELEMETRY_SCOPE, "0.1.0"));
+		const tracer = traceProvider.getTracer(TELEMETRY_SCOPE, TELEMETRY_SCOPE_VERSION);
+		const metrics = createTelemetryMetrics(meterProvider.getMeter(TELEMETRY_SCOPE, TELEMETRY_SCOPE_VERSION));
 		const propagation = createPropagation(tracer, metrics);
 		const context = new OtelTelemetryContext(ROOT_CONTEXT, tracer, metrics, propagation);
 		let closed = false;
