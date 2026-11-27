@@ -120,8 +120,8 @@ function declaredPresetNames(document: ReturnType<typeof parseDocument>): string
 	const contents = document.contents;
 	if (!isMap(contents)) return [];
 	return contents.items.flatMap((pair) =>
-		isScalar(pair.key) && pair.key.value === "name" && isScalar(pair.value) && typeof pair.value.value === "string"
-			? [pair.value.value]
+		isScalar(pair.key) && pair.key.value === "name" && isScalar(pair.value)
+			? [String(pair.value.value)]
 			: [],
 	);
 }
@@ -163,11 +163,12 @@ export async function loadPresetCatalog(agentDir: string): Promise<PresetCatalog
 			const lines = source.split(/\r?\n/);
 			if (lines[0] !== "---") continue; // Supporting Markdown is intentionally ignored.
 			const end = lines.findIndex((line, index) => index > 0 && line === "---");
-			if (end < 0) throw new Error("Unclosed YAML frontmatter; expected a closing --- line");
-			const document = parseDocument(lines.slice(1, end).join("\n"), { uniqueKeys: true, version: "1.2", schema: "core" });
+			const yamlLines = end < 0 ? lines.slice(1) : lines.slice(1, end);
+			const document = parseDocument(yamlLines.join("\n"), { uniqueKeys: true, version: "1.2", schema: "core" });
 			// Preserve recoverable declared IDs even when YAML is malformed, so selecting
 			// any affected preset fails closed instead of treating it as absent.
 			errorNames = declaredPresetNames(document);
+			if (end < 0) throw new Error("Unclosed YAML frontmatter; expected a closing --- line");
 			if (document.errors.length > 0) throw new Error(`Invalid YAML frontmatter: ${document.errors[0]?.message}`);
 			if (document.warnings.length > 0) throw new Error(`Invalid YAML frontmatter: ${document.warnings[0]?.message}`);
 			const settings: unknown = document.toJS({ maxAliasCount: 0 });
@@ -175,7 +176,10 @@ export async function loadPresetCatalog(agentDir: string): Promise<PresetCatalog
 			const rawName = (settings as Record<string, unknown>).name;
 			if (rawName === undefined) continue;
 			if (typeof rawName !== "string") {
-				entries.set(file, { error: '"name" must be a preset ID string', file });
+				const invalidNameKey = String(rawName);
+				const definitionsForName = definitions.get(invalidNameKey) ?? [];
+				definitionsForName.push({ file, error: '"name" must be a preset ID string' });
+				definitions.set(invalidNameKey, definitionsForName);
 				continue;
 			}
 			if (!errorNames.includes(rawName)) errorNames.push(rawName);

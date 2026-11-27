@@ -109,6 +109,8 @@ describe("agent presets", () => {
 		await mkdir(agentsDir, { recursive: true });
 		await writeFile(join(agentsDir, "broken.md"), "---\nname: broken\ndescription: [unterminated\n---\nInstructions", "utf8");
 		await writeFile(join(agentsDir, "unidentifiable.md"), "---\nname: [\n---\nInstructions", "utf8");
+		await writeFile(join(agentsDir, "unclosed.md"), "---\nname: unclosed\ndescription: Missing closing delimiter\nmodel: inherit\neffort: high\n\nInstructions", "utf8");
+		await writeFile(join(agentsDir, "non-string-id.md"), "---\nname: 123\ndescription: Numeric name\nmodel: inherit\neffort: high\n---\nInstructions", "utf8");
 		await writeFile(join(agentsDir, "invalid-id.md"), validDefinition("bad name"), "utf8");
 		await writeFile(join(agentsDir, "collision-malformed.md"), "---\nname: collision\ndescription: [unterminated\n---\nInstructions", "utf8");
 		await writeFile(join(agentsDir, "collision-valid.md"), validDefinition("collision"), "utf8");
@@ -120,6 +122,10 @@ describe("agent presets", () => {
 		expect(catalog.entries.get("broken")?.error).toMatch(/Invalid YAML frontmatter/);
 		expect(() => getPresetOrFallback(catalog, "broken")).toThrow(/Preset "broken" is invalid/);
 		expect(catalog.entries.get("unidentifiable.md")?.error).toMatch(/Invalid YAML frontmatter/);
+		expect(catalog.entries.get("unclosed")?.error).toMatch(/Unclosed YAML frontmatter/);
+		expect(() => getPresetOrFallback(catalog, "unclosed")).toThrow(/Preset "unclosed" is invalid/);
+		expect(catalog.entries.get("123")?.error).toMatch(/preset ID string/);
+		expect(() => getPresetOrFallback(catalog, "123")).toThrow(/Preset "123" is invalid/);
 		expect(catalog.entries.get("bad name")?.error).toMatch(/preset ID/);
 		expect(() => getPresetOrFallback(catalog, "bad name")).toThrow(/Preset "bad name" is invalid/);
 		expect(catalog.entries.get("collision")?.error).toMatch(/collision-malformed.md, collision-valid.md/);
