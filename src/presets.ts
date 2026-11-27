@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import { parseDocument } from "yaml";
+import { isMap, isScalar, parseDocument } from "yaml";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 export const DURABLE_TOOL_NAMES = ["read", "write", "edit", "bash"] as const;
@@ -116,6 +116,16 @@ export function parseAgentPreset(markdown: string): AgentPreset {
 	};
 }
 
+function declaredPresetNames(document: ReturnType<typeof parseDocument>): string[] {
+	const contents = document.contents;
+	if (!isMap(contents)) return [];
+	return contents.items.flatMap((pair) =>
+		isScalar(pair.key) && pair.key.value === "name" && isScalar(pair.value) && typeof pair.value.value === "string"
+			? [pair.value.value]
+			: [],
+	);
+}
+
 async function markdownFiles(directory: string): Promise<string[]> {
 	const result: string[] = [];
 	const visit = async (current: string): Promise<void> => {
@@ -143,10 +153,11 @@ export async function loadPresetCatalog(agentDir: string): Promise<PresetCatalog
 	}
 
 	const entries = new Map<string, { preset?: AgentPreset; error?: string; file?: string }>();
-	const definitions = new Map<string, Array<{ file: string; source: string }>>();
+	const definitions = new Map<string, Array<{ file: string; source?: string; error?: string }>>();
 	for (const path of files) {
 		const file = relative(directory, path).split(sep).join("/");
 		let source: string;
+		let errorNames: string[] = [];
 		try {
 			source = await readFile(path, "utf8");
 			const lines = source.split(/\r?\n/);
@@ -154,23 +165,35 @@ export async function loadPresetCatalog(agentDir: string): Promise<PresetCatalog
 			const end = lines.findIndex((line, index) => index > 0 && line === "---");
 			if (end < 0) throw new Error("Unclosed YAML frontmatter; expected a closing --- line");
 			const document = parseDocument(lines.slice(1, end).join("\n"), { uniqueKeys: true, version: "1.2", schema: "core" });
+			// Preserve recoverable declared IDs even when YAML is malformed, so selecting
+			// any affected preset fails closed instead of treating it as absent.
+			errorNames = declaredPresetNames(document);
 			if (document.errors.length > 0) throw new Error(`Invalid YAML frontmatter: ${document.errors[0]?.message}`);
 			if (document.warnings.length > 0) throw new Error(`Invalid YAML frontmatter: ${document.warnings[0]?.message}`);
 			const settings: unknown = document.toJS({ maxAliasCount: 0 });
 			if (settings === null || typeof settings !== "object" || Array.isArray(settings)) continue; // No mapping means no `name` field.
 			const rawName = (settings as Record<string, unknown>).name;
 			if (rawName === undefined) continue;
-			if (typeof rawName !== "string" || rawName.trim() !== rawName || rawName.length === 0) {
-				entries.set(file, { error: '"name" must be a non-empty preset ID string', file });
+			if (typeof rawName !== "string") {
+				entries.set(file, { error: '"name" must be a preset ID string', file });
 				continue;
 			}
+			if (!errorNames.includes(rawName)) errorNames.push(rawName);
 			const definitionsForName = definitions.get(rawName) ?? [];
 			definitionsForName.push({ file, source });
 			definitions.set(rawName, definitionsForName);
 		} catch (error) {
-			// YAML errors cannot be reliably associated with a preset ID, so retain
-			// a path-keyed diagnostic instead of silently hiding a malformed file.
-			entries.set(file, { error: error instanceof Error ? error.message : String(error), file });
+			// Key by every recoverable declared name, otherwise retain a path-keyed diagnostic.
+			const message = error instanceof Error ? error.message : String(error);
+			if (errorNames.length > 0) {
+				for (const name of new Set(errorNames)) {
+					const definitionsForName = definitions.get(name) ?? [];
+					definitionsForName.push({ file, error: message });
+					definitions.set(name, definitionsForName);
+				}
+			} else {
+				entries.set(file, { error: message, file });
+			}
 		}
 	}
 
@@ -181,8 +204,12 @@ export async function loadPresetCatalog(agentDir: string): Promise<PresetCatalog
 			continue;
 		}
 		const definition = definitionsForName[0]!;
+		if (definition.error !== undefined) {
+			entries.set(id, { error: definition.error, file: definition.file });
+			continue;
+		}
 		try {
-			const preset = parseAgentPreset(definition.source);
+			const preset = parseAgentPreset(definition.source!);
 			entries.set(id, { preset, file: definition.file });
 		} catch (error) {
 			entries.set(id, { error: error instanceof Error ? error.message : String(error), file: definition.file });

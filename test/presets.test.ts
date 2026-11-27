@@ -107,13 +107,23 @@ describe("agent presets", () => {
 		const agentDir = await temporaryDirectory();
 		const agentsDir = join(agentDir, "agents");
 		await mkdir(agentsDir, { recursive: true });
-		await writeFile(join(agentsDir, "broken.md"), "---\nname: [\n---\nInstructions", "utf8");
+		await writeFile(join(agentsDir, "broken.md"), "---\nname: broken\ndescription: [unterminated\n---\nInstructions", "utf8");
+		await writeFile(join(agentsDir, "unidentifiable.md"), "---\nname: [\n---\nInstructions", "utf8");
+		await writeFile(join(agentsDir, "invalid-id.md"), validDefinition("bad name"), "utf8");
+		await writeFile(join(agentsDir, "collision-malformed.md"), "---\nname: collision\ndescription: [unterminated\n---\nInstructions", "utf8");
+		await writeFile(join(agentsDir, "collision-valid.md"), validDefinition("collision"), "utf8");
 		await writeFile(join(agentsDir, "notes.md"), "---\ntitle: Notes\n---\nSupporting doc", "utf8");
 		await writeFile(join(agentsDir, "scalar.md"), "---\njust a supporting note\n---\nBody", "utf8");
 		await writeFile(join(agentsDir, "list.md"), "---\n- supporting\n- material\n---\nBody", "utf8");
 		const catalog = await loadPresetCatalog(agentDir);
 
-		expect(catalog.entries.get("broken.md")?.error).toMatch(/Invalid YAML frontmatter/);
+		expect(catalog.entries.get("broken")?.error).toMatch(/Invalid YAML frontmatter/);
+		expect(() => getPresetOrFallback(catalog, "broken")).toThrow(/Preset "broken" is invalid/);
+		expect(catalog.entries.get("unidentifiable.md")?.error).toMatch(/Invalid YAML frontmatter/);
+		expect(catalog.entries.get("bad name")?.error).toMatch(/preset ID/);
+		expect(() => getPresetOrFallback(catalog, "bad name")).toThrow(/Preset "bad name" is invalid/);
+		expect(catalog.entries.get("collision")?.error).toMatch(/collision-malformed.md, collision-valid.md/);
+		expect(() => getPresetOrFallback(catalog, "collision")).toThrow(/Duplicate preset name/);
 		expect(catalog.entries.has("notes.md")).toBe(false);
 		expect(catalog.entries.has("scalar.md")).toBe(false);
 		expect(catalog.entries.has("list.md")).toBe(false);
