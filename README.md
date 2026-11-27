@@ -110,27 +110,31 @@ Status and stats read Durable usage records for managed child conversations only
 
 ### Presets
 
-Presets are user-global at:
+Presets are user-global Markdown files discovered recursively under:
 
 ```text
-<Pi configured agent directory>/agents/<preset-id>/agent.md
+<Pi configured agent directory>/agents/**/*.md
 ```
 
-The base directory comes from Pi's `getAgentDir()` configuration. Example:
+The base directory comes from Pi's `getAgentDir()` configuration. A file defines a preset only when its YAML frontmatter contains `name`; Markdown without `name` is ignored and can be used as supporting documentation. The frontmatter `name`, not the filename or folder, is the preset ID and must be unique. For example:
 
 ```md
 ---
+name: researcher
+description: Research a topic and return a concise, sourced report.
 tools: [read, bash]
-model: <provider>/<model-id>
-thinking: high
+model: inherit
+effort: high
 ---
 
 Search the project and return a concise summary with file references.
 ```
 
-`tools`, `model`, and `thinking` are optional. Supported durable-native tools are `read`, `write`, `edit`, and `bash`; an explicit tool list is an exact allowlist. If omitted, all four tools are available. Model values use `provider/model-id` and must resolve through Pi's model registry with provider authentication configured in Pi. A preset model is an explicit override; when omitted, the agent inherits the main agent's selected model and follows later changes. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+`name`, `description`, `model`, and `effort` are required. `model` accepts `inherit` or `provider/model-id`; explicit references must resolve through Pi's model registry and configured provider authentication. `effort` accepts `inherit` or `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (mapped to Pi's thinking level). Inherited model and effort follow later parent changes; explicit values remain fixed for existing agents.
 
-Preset files are read and cached when the extension loads. Changes apply to new agents after Pi `/reload`; they do not rewrite existing agents. Malformed present presets, unsupported settings/tools, and unavailable configured models fail closed with an error. Explicit preset values stay fixed for existing agents; inherited model and thinking settings follow later main-agent changes.
+`tools` is optional and Pi-specific. Supported durable-native tools are `read`, `write`, `edit`, and `bash`; an explicit non-empty list is an exact allowlist. If omitted, all four tools are available. Claude Code tool names and Claude-only settings are not supported. Unknown frontmatter fields, malformed definitions, duplicate IDs, invalid settings, and empty instruction bodies are reported as preset errors and never silently broaden tool access or substitute another model. The `/agents presets` listing includes each description and its available tools; the main agent receives the descriptions to help it select a useful preset.
+
+Preset files are read and cached when the extension loads. Changes apply to new agents after Pi `/reload`; they do not rewrite existing agents. See [the agent preset file guide](docs/agents/agent-files.md) for the complete schema and portability caveats.
 
 ### Running-agent footer
 

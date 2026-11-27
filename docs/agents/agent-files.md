@@ -1,6 +1,6 @@
 # Agent preset files
 
-> **Status:** This describes the target format for the recursive-preset feature tracked by the agent-preset metadata issue. The current extension does not yet load this format; it must be implemented before these instructions are runtime-effective.
+> **Status:** Supported by the extension. Preset files are loaded once at extension initialization and refreshed with Pi `/reload`.
 
 ## Location and discovery
 

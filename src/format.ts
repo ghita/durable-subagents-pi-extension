@@ -25,11 +25,23 @@ export function formatStats(total: UsageTotals, rows: readonly StatsRow[]): stri
 	return [header, ...rows.map(({ name, usage }) => `${name} — ${money(usage.cost)}; ${tokenLine(usage)}`)].join("\n");
 }
 
+export function describePresetsForAgent(catalog: PresetCatalog): string {
+	const presets = [...catalog.valid.values()].sort((a, b) => a.id.localeCompare(b.id));
+	return presets.length === 0
+		? "No configured presets are currently cached."
+		: `Cached presets (ID — purpose; available tools): ${presets.map((preset) => `${preset.id} — ${preset.description}; ${preset.tools?.join(", ") ?? "all durable tools"}`).join(" | ")}.`;
+}
+
 export function formatPresets(catalog: PresetCatalog): string {
-	if (catalog.entries.size === 0) return "No presets found. Add user-global presets under <Pi agent dir>/agents/<preset-id>/agent.md.";
+	if (catalog.entries.size === 0) return "No presets found. Add user-global agent definitions under <Pi agent dir>/agents/**/*.md.";
 	return [...catalog.entries.entries()]
 		.sort(([a], [b]) => a.localeCompare(b))
-		.map(([id, entry]) => (entry.error === undefined ? `${id} — configured agent preset` : `${id} — INVALID: ${entry.error}`))
+		.map(([id, entry]) => {
+			if (entry.error !== undefined) return `${id} — INVALID: ${entry.error}${entry.file === undefined ? "" : ` (${entry.file})`}`;
+			const preset = entry.preset!;
+			const tools = preset.tools === undefined ? "all durable tools" : `tools: ${preset.tools.join(", ")}`;
+			return `${id} — ${preset.description} (${tools})`;
+		})
 		.join("\n");
 }
 
