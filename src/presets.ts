@@ -157,10 +157,7 @@ export async function loadPresetCatalog(agentDir: string): Promise<PresetCatalog
 			if (document.errors.length > 0) throw new Error(`Invalid YAML frontmatter: ${document.errors[0]?.message}`);
 			if (document.warnings.length > 0) throw new Error(`Invalid YAML frontmatter: ${document.warnings[0]?.message}`);
 			const settings: unknown = document.toJS({ maxAliasCount: 0 });
-			if (settings === null || typeof settings !== "object" || Array.isArray(settings)) {
-				entries.set(file, { error: "YAML frontmatter must be a mapping", file });
-				continue;
-			}
+			if (settings === null || typeof settings !== "object" || Array.isArray(settings)) continue; // No mapping means no `name` field.
 			const rawName = (settings as Record<string, unknown>).name;
 			if (rawName === undefined) continue;
 			if (typeof rawName !== "string" || rawName.trim() !== rawName || rawName.length === 0) {
