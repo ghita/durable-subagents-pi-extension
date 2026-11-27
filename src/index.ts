@@ -11,7 +11,7 @@ import { AgentService } from "./agent-service.ts";
 import { AgentFooterController } from "./footer.ts";
 import { getAgentCompletions } from "./autocomplete.ts";
 import { parseAgentsCommand } from "./command-parser.ts";
-import { formatAgentList, formatAgentSummary, formatHelp, formatPresets, formatStats } from "./format.ts";
+import { describePresetsForAgent, formatAgentList, formatAgentSummary, formatHelp, formatPresets, formatStats } from "./format.ts";
 import { modelReference } from "./model-bridge.ts";
 import { loadPresetCatalog } from "./presets.ts";
 import { openManagedSessionRuntime, type ManagedSessionRuntime, requireSessionFile } from "./runtime.ts";
@@ -106,10 +106,6 @@ async function notifyCommand(context: ExtensionContext, action: () => Promise<st
 	}
 }
 
-function describePresetIds(ids: readonly string[]): string {
-	return ids.length === 0 ? "No configured presets are currently cached." : `Cached presets: ${ids.join(", ")}.`;
-}
-
 const STATUS_SNAPSHOT_GUIDANCE =
 	"Status snapshot only—not the agent's report. Idle means no work is active; a completed report may still be queued until the next model call. Messages in/out counts accepted instructions/reports recorded in Pi. Reports arrive separately as steering messages; do not poll status/list or send the task again to retrieve one.";
 
@@ -173,6 +169,7 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 	// Loading at extension initialization makes the preset view stable until Pi reloads this extension.
 	const presetCatalog = await loadPresetCatalog(getAgentDir());
 	const presetIds = [...presetCatalog.valid.keys()].sort((a, b) => a.localeCompare(b));
+	const presetGuidance = describePresetsForAgent(presetCatalog);
 
 	async function agentNames(): Promise<string[]> {
 		if (activeRuntime === undefined) return [];
@@ -184,7 +181,7 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 	}
 
 	pi.registerCommand("agents", {
-		description: `Manage persistent named background agents. ${describePresetIds(presetIds)}`,
+		description: `Manage persistent named background agents. ${presetGuidance}`,
 		getArgumentCompletions: async (prefix) => {
 			if (/^panes\s/.test(prefix)) {
 				const match = prefix.match(/^(panes\s+)(\d*)$/);
@@ -263,7 +260,7 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 		promptSnippet: "Manage persistent agents asynchronously. spawn/send return acknowledgments, not results; completed reports arrive separately as Pi steering messages at the next model-call boundary after current tool calls. list/status are status snapshots only, never report retrieval. Idle means no active work, not necessarily that the report has been delivered. Do not poll or resend to fetch a report.",
 		description:
 			"Manage persistent named background agents. spawn and send are asynchronous: they acknowledge accepted work but do not return its answer. The completed answer is delivered separately as an extension-authored Pi steering message; if Pi is busy, it is queued for the next model call after current tool calls finish. list/status return state, usage, and message counts only—not report text. Idle means no work is active; it does not guarantee the report is already in the main transcript. Do not poll list/status or send the task again to retrieve an answer. Actions: spawn (name/presetId/message), send (name/message; creates new work), list, status (optionally name), stop, stop-all, stats. " +
-			`Choose a relevant configured preset when useful. ${describePresetIds(presetIds)} If no preset applies, all durable-native coding tools are enabled.`,
+			`Choose a relevant configured preset when useful. ${presetGuidance} If no preset applies, all durable-native coding tools are enabled.`,
 		parameters: SubagentParameters,
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 		execute: async (_toolCallId, args, _signal, _onUpdate, context: ExtensionToolContext) => {

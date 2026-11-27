@@ -572,6 +572,7 @@ describe("AgentService durable lifecycle", () => {
 	it("rejects an unavailable explicit model before creating any managed agent", async () => {
 		const preset: AgentPreset = {
 			id: "unavailable",
+			description: "An unavailable model.",
 			instructions: "Invalid model must fail before creation.",
 			model: { provider: "faux", modelId: "not-installed" },
 		};
@@ -588,6 +589,7 @@ describe("AgentService durable lifecycle", () => {
 	it("rejects an explicit model without configured provider authentication", async () => {
 		const preset: AgentPreset = {
 			id: "no-login",
+			description: "A model that needs authentication.",
 			instructions: "Never fall back to another provider.",
 			model: { provider: "faux", modelId: "faux-pinned" },
 		};
@@ -662,8 +664,9 @@ describe("AgentService durable lifecycle", () => {
 		};
 		const preset: AgentPreset = {
 			id: "pinned",
-				instructions: "Use the pinned configuration.",
-				model: { provider: "faux", modelId: "faux-pinned" },
+			description: "A pinned agent configuration.",
+			instructions: "Use the pinned configuration.",
+			model: { provider: "faux", modelId: "faux-pinned" },
 				thinking: "low",
 				tools: ["read"],
 			};
