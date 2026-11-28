@@ -4,7 +4,7 @@
 
 - Discover and validate recursive agent preset definitions.
 - Bundle Scout and Review presets, with an explicit additive install command and Code Mode support.
-- Create the durable SQLite sidecar lazily and resume existing managed-agent state on session startup.
+- Create the durable SQLite sidecar lazily and resume existing managed-agent state on session startup ([issue #3](https://github.com/ghita/durable-subagents-pi-extension/issues/3)).
 
 ## [0.2.0] - 2026-11-26
 
