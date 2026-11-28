@@ -1,6 +1,6 @@
 {
   "name": "pi-durable-subagents-extension",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Persistent background agents for Pi",
   "type": "module",
   "license": "MIT",
@@ -15,7 +15,9 @@
   "files": [
     "src",
     "presets",
+    "CHANGELOG.md",
     "docs/agents/agent-files.md",
+    "docs/herdr.md",
     "docs/images",
     "README.md",
     "GLOSSARY.md",

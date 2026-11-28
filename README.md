@@ -2,7 +2,7 @@
 
 **Delegate work to background agents, keep working while they run, and return to the same named agents for follow-up tasks.**
 
-Pi Durable Subagents is a Pi extension for managing named, reusable agents backed by `@earendil-works/pi-durable`. Spawn agents through Pi's `subagent` tool or control them directly with `/agents`.
+Pi Durable Subagents is a Pi extension for managing named, reusable agents backed by `@earendil-works/pi-durable`. Ask Pi to delegate work to an agent, or manage agents directly with `/agents`.
 
 <p align="center">
   <img src="docs/images/subagent-delegation.png" alt="Pi delegates a task to a named joke agent, continues its turn, and receives the agent's report while the child agent is visible in a separate terminal pane." width="100%">
@@ -13,19 +13,19 @@ Pi Durable Subagents is a Pi extension for managing named, reusable agents backe
 
 - **Delegate and keep going.** Spawn work asynchronously; the agent reports back to the main Pi conversation when it finishes.
 - **Reuse named agents.** Each agent keeps its own durable conversation. Send follow-up work to the same agent, including after resuming the Pi session.
-- **Choose how to work.** Ask Pi to delegate through the `subagent` tool, or manage agents yourself with `/agents`.
+- **Choose how to work.** Ask Pi to delegate work to an agent, or manage agents yourself with `/agents`.
 - **See what's happening.** Track active work, requests, usage, and costs in the Pi footer and with agent status commands.
-- **Configure agents with presets.** Set an agent's tool allowlist, model, and thinking level.
+- **Start with packaged presets.** Run `/agents install` to add the included `scout` and `review` agents without overwriting existing presets; customize their tool allowlist, model, or thinking level as needed.
 - **Optionally use live Herdr panes.** In a Herdr-managed terminal, a bounded pool of panes shows agent activity without limiting how many agents can work.
 
 ## How it works
 
-The `subagent` tool and `/agents` commands use the same extension service and agent registry. Child agents have their own durable conversations. Their reports return to the main Pi agent as steering messages; if Pi is busy, a report is delivered after the current tool batch.
+Pi's agent delegation and `/agents` commands use the same extension service and agent registry. Child agents have their own durable conversations. Their reports return to the main Pi agent as steering messages; if Pi is busy, a report is delivered after the current tool batch.
 
 ```mermaid
 flowchart LR
     User[You] --> Main[Main Pi agent]
-    Main -->|subagent tool| Service[Durable Subagents extension]
+    Main -->|agent request| Service[Durable Subagents extension]
     User -->|/agents commands| Service
     Service <--> Registry[Agent registry and SQLite sidecar]
     Service -->|spawn or send task| Child[Named durable sub-agents]
@@ -64,7 +64,21 @@ pi --extension ./src/index.ts
 
 ## Quick start
 
-Ask Pi to delegate a task in natural language, for example:
+Install the packaged presets if they are missing, then reload Pi before using newly installed presets:
+
+```text
+/agents install
+/reload
+/agents presets
+```
+
+For example, start the Scout preset with:
+
+```text
+/agents spawn scout -- Map the main modules and report how they fit together.
+```
+
+Or ask Pi to delegate a task in natural language, for example:
 
 > Start a named agent called `researcher` and ask it to compare the main approaches in this project. Continue with my other request while it works, then summarize its report when it arrives.
 
@@ -77,7 +91,7 @@ Or spawn and manage an agent directly:
 /agents status researcher
 ```
 
-The `subagent` tool supports `spawn`, `send`, `list`, `status`, `stop`, `stop-all`, and `stats`. It shares the same registry, presets, history, and service as `/agents`.
+Pi's agent tool supports `spawn`, `send`, `list`, `status`, `stop`, `stop-all`, and `stats`. It shares the same registry, presets, history, and service as `/agents`.
 
 ## Commands
 
@@ -137,7 +151,14 @@ Search the project and return a concise summary with file references.
 
 Preset files are read and cached when the extension loads. Changes apply to new agents after Pi `/reload`; they do not rewrite existing agents.
 
-The extension ships `scout` and `review` presets. `/agents presets` shows when either packaged default is missing and recommends `/agents install`. Installation copies all missing packaged presets into the user-global agent library, skips existing IDs without overwriting them, and is safe to repeat. The copied files remain after package removal, and upgrades do not replace them. Run `/reload` after installation before using new presets. Both defaults inherit the current model, use only `read` and `bash`, and enable Code Mode with `models.*` helpers disabled; Scout uses low thinking and Review uses high thinking. Their instructions are packaged as Markdown under `presets/`.
+The extension ships these defaults:
+
+| Preset | Use it for | Model | Thinking | Tools | Code Mode |
+|---|---|---|---|---|---|
+| `scout` | Codebase reconnaissance with evidence and file paths | Inherited | Low | `read`, `bash` | Yes; model helpers disabled |
+| `review` | Reviewing changes for correctness, security, and regressions | Inherited | High | `read`, `bash` | Yes; model helpers disabled |
+
+`/agents presets` identifies missing defaults and recommends `/agents install`. Installation copies all missing packaged presets into the user-global agent library, skips existing IDs without overwriting them, and is safe to repeat. Copies remain after package removal, and upgrades do not replace them. Run `/reload` after installing presets before using them. The preset instructions are Markdown files under `presets/`.
 
 See [the agent preset file guide](docs/agents/agent-files.md) for the complete schema, installation behavior, and portability caveats.
 
@@ -151,17 +172,7 @@ The display refreshes about once a second while agents are running. Context usag
 
 ### Herdr live agent panes
 
-When the extension runs in a Herdr-managed pane, it automatically shares a bounded pool of non-focused agent-display panes in the current tab. **The default budget is 3 panes.** This limits displays, not agents: overflow agents keep executing and reporting normally, without creating overflow tabs. The main Pi pane and unrelated terminals do not count toward the budget.
-
-Use `/agents panes` to report the current budget and `/agents panes K` to set a nonnegative integer budget immediately. `/agents panes 0` removes owned displays without stopping agents or deleting their durable conversations. Increasing the budget admits waiting active agents immediately. Shrinking removes idle displays first, then the most recently assigned active displays; displaced agents keep their original waiting priority. The preference is runtime-only: it survives managed-session runtime recreation in the same extension instance, but resets to 3 on extension reload or Pi restart. Different Herdr tabs have independent budgets. **Only one display-managing main Pi session per Herdr tab is supported**; multiple managers sharing a tab are not coordinated.
-
-Displayed active agents retain their slots. Waiting active agents are admitted in arrival order, skipping agents that become idle before admission. An agent is eligible while it has executing or queued instructions; pending report delivery alone does not count. An idle pane retains its last output until another active agent needs the slot, with the longest-idle pane reused first. An undisplayed agent receiving more work joins the back of the queue, regardless of earlier pane ownership. There are no manual selection or pinning commands.
-
-Reassignment reuses the pane, clears both the screen and scrollback, shows the new agent's identity (name, model, and thinking level), and replays its current-task output before live updates continue. The old agent's history remains in its durable conversation, not in the reused display. Panes show user inputs, assistant text (not hidden thinking), and completed tool calls with compact arguments and success/failure status; tool results are not copied. A private local renderer socket avoids echoing bootstrap commands for every update.
-
-On resume/reload, tracked owned panes are reconciled to the budget, retaining eligible active displays first and idle displays only in spare slots. Excess legacy displays are closed without touching unrelated terminals or deleting agent state. Manually closing a display does not reduce the budget: active demand can recreate it, checked about once a second. Use `/agents panes K` to reduce the footprint instead. Panes are explicitly targeted without stealing focus.
-
-The integration is enabled only when `HERDR_ENV=1` and `HERDR_WORKSPACE_ID` are present and the `herdr` CLI is available. Display failures never stop agent work. Failed or uncertain pane operations are conservatively accounted for rather than risking extra replacements beyond the budget. A split is durably reserved before invoking Herdr; an unresolved split outcome suspends new pane creation even across reloads, until the reservation is explicitly resolved after inspection. There is no automatic reset on restart. Known-pane reconciliation can still retry, and a confirmed failure to start the CLI does not leave a reservation. Failures produce rate-limited visible warnings (at most one per 30 seconds), rather than notification flooding.
+In Herdr-managed terminals, the extension can display agent activity in a bounded pool of panes. The default budget is three; it limits displays, not agent execution. Configure the budget with `/agents panes`. See the [Herdr live agent panes guide](docs/herdr.md) for requirements, assignment behavior, and recovery details.
 
 ### Opt-in OpenTelemetry
 
