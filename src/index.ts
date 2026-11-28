@@ -15,6 +15,7 @@ import { describePresetsForAgent, formatAgentList, formatAgentSummary, formatHel
 import { modelReference } from "./model-bridge.ts";
 import { installPackagedPresets, loadPackagedPresets, loadPresetCatalog } from "./presets.ts";
 import { openManagedSessionRuntime, type ManagedSessionRuntime, requireSessionFile } from "./runtime.ts";
+import { durableDatabaseExists } from "./storage-path.ts";
 const SubagentParameters = Type.Object({
 	action: Type.Union([
 		Type.Literal("spawn", { description: "Start a named agent asynchronously. Returns an acknowledgment; its report is steered to the main agent at the next model-call boundary." }),
@@ -297,8 +298,24 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 
 	pi.on("session_start", async (event, context) => {
 		if (event.reason === "reload" || event.reason === "startup") paneLimit = 3;
-		if (context.sessionManager.getSessionFile() === undefined) return;
+		const sessionFile = context.sessionManager.getSessionFile();
+		if (sessionFile === undefined) return;
 		try {
+			// Opening Durable creates the SQLite file. Resume automatically only when
+			// this transcript already has managed-agent state; first use stays lazy.
+			if (!(await durableDatabaseExists(sessionFile))) {
+				// A session switch still retires the previous session's runtime even
+				// when the new session has no sidecar to open.
+				const targetSessionFile = requireSessionFile(sessionFile);
+				await serializeRuntime(async () => {
+					if (activeRuntime?.sessionFile === targetSessionFile) return;
+					const previous = activeRuntime;
+					activeRuntime = undefined;
+					stopFooter();
+					await previous?.close();
+				});
+				return;
+			}
 			await getRuntime(pi, context);
 		} catch (error) {
 			context.ui.notify(error instanceof Error ? error.message : String(error), "error");

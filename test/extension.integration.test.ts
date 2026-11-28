@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -144,25 +145,18 @@ describe("Pi extension integration", () => {
 		await handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, context);
 		expect(commands.has("agents")).toBe(true);
 		expect(tools.has("durable_subagent")).toBe(true);
+		const databasePath = join(directory, "transcript.durable.sqlite");
+		expect(existsSync(databasePath)).toBe(false);
+		expect(display.attach).not.toHaveBeenCalled();
+		await commands.get("agents")!.handler("help", commandContext);
 		await commands.get("agents")!.handler("presets", commandContext);
+		expect(existsSync(databasePath)).toBe(false);
 		expect(notifications.at(-1)).toContain("Packaged defaults missing: review, scout. Run /agents install");
 		await commands.get("agents")!.handler("install", commandContext);
 		expect(notifications.at(-1)).toContain("Installed packaged presets: review, scout. Run /reload before using the newly installed presets.");
 		await commands.get("agents")!.handler("install", commandContext);
 		expect(notifications.at(-1)).toContain("No new packaged presets installed.");
 		expect(notifications.at(-1)).toContain("Skipped existing preset IDs without overwriting them: review, scout.");
-		expect(display.options.paneLimit).toBe(3);
-		expect(display.attach).toHaveBeenCalledOnce();
-		// Display errors are visible but rate-limited independently of durable work.
-		contextState.hasUI = true;
-		display.options.onError(new Error("display unavailable"), "analyst");
-		display.options.onError(new Error("display unavailable again"), "other");
-		expect(notifications.filter((message) => message.includes("Managed-agent display failed"))).toHaveLength(1);
-		const initialRefreshes = display.refresh.mock.calls.length;
-		display.refresh.mockRejectedValueOnce(new Error("poll temporarily unavailable"));
-		await vi.waitFor(() => expect(display.refresh.mock.calls.length).toBeGreaterThan(initialRefreshes + 1), { timeout: 3_000 });
-		expect(notifications.filter((message) => message.includes("Managed-agent display failed"))).toHaveLength(1);
-
 		const tool = tools.get("durable_subagent")!;
 		expect(tool.promptSnippet).toContain("acknowledgments, not results");
 		expect(tool.description).toContain("list/status return state, usage, and message counts only—not report text");
@@ -174,6 +168,18 @@ describe("Pi extension integration", () => {
 			undefined,
 			context as ExtensionToolContext,
 		)) as AgentToolResult;
+		expect(existsSync(databasePath)).toBe(true);
+		expect(display.options.paneLimit).toBe(3);
+		expect(display.attach).toHaveBeenCalledOnce();
+		// Display errors are visible but rate-limited independently of durable work.
+		contextState.hasUI = true;
+		display.options.onError(new Error("display unavailable"), "analyst");
+		display.options.onError(new Error("display unavailable again"), "other");
+		expect(notifications.filter((message) => message.includes("Managed-agent display failed"))).toHaveLength(1);
+		const initialRefreshes = display.refresh.mock.calls.length;
+		display.refresh.mockRejectedValueOnce(new Error("poll temporarily unavailable"));
+		await vi.waitFor(() => expect(display.refresh.mock.calls.length).toBeGreaterThan(initialRefreshes + 1), { timeout: 3_000 });
+		expect(notifications.filter((message) => message.includes("Managed-agent display failed"))).toHaveLength(1);
 		expect(toolResult.content?.[0]).toMatchObject({
 			type: "text",
 			text: expect.stringContaining("Started analyst asynchronously. This is an acknowledgment, not the result."),
@@ -234,8 +240,18 @@ describe("Pi extension integration", () => {
 
 		await handlers.get("session_shutdown")?.[0]?.({ type: "session_shutdown", reason: "quit" }, context);
 		await handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "resume" }, context);
+		expect(existsSync(databasePath)).toBe(true);
+		expect(display.attach).toHaveBeenCalledTimes(2);
 		await commands.get("agents")!.handler("list", commandContext);
 		expect(notifications.at(-1)).toContain("analyst");
+		faux.appendResponses([fauxAssistantMessage("Recovered after reopening the existing sidecar.")]);
+		await commands.get("agents")!.handler("send analyst Continue after resuming.", commandContext);
+		const resumedDeadline = Date.now() + 5_000;
+		while (messages.length < 3 && Date.now() < resumedDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(messages).toHaveLength(3);
+		expect(messages[2]?.message).toMatchObject({
+			content: expect.stringContaining("Recovered after reopening the existing sidecar."),
+		});
 		// Even a stale UI throwing while a display close fails must not poison
 		// runtime shutdown (Durable and telemetry still need their cleanup).
 		display.close.mockRejectedValueOnce(new Error("display close unavailable"));

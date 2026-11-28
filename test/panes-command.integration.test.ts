@@ -4,9 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	open: vi.fn(),
+	databaseExists: vi.fn(),
 	setLimit: vi.fn(),
 	close: vi.fn(),
 	reportError: vi.fn(),
+}));
+vi.mock("../src/storage-path.ts", async () => ({
+	...(await vi.importActual<typeof import("../src/storage-path.ts")>("../src/storage-path.ts")),
+	durableDatabaseExists: mocks.databaseExists,
 }));
 vi.mock("../src/runtime.ts", async () => ({
 	...(await import("../src/storage-path.ts")),
@@ -42,6 +47,7 @@ async function extension() {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.databaseExists.mockResolvedValue(true);
 	mocks.setLimit.mockResolvedValue(undefined);
 	mocks.close.mockResolvedValue(undefined);
 	mocks.open.mockImplementation(async (_pi, context, paneLimit) => {
