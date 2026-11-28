@@ -191,10 +191,6 @@ OTEL_EXPORTER_OTLP_HEADERS='Authorization=Bearer%20collector-token' pi
 
 When enabled, traces cover managed-agent requests through child model/tool activity and report delivery. Task text, assistant responses, tool-call arguments, and tool outputs are included (each field is capped at 64 KiB with truncation metadata); hidden reasoning is excluded, and credential-like keys in tool arguments are redacted. Free-form task and tool content may still contain sensitive data, so configure a trusted collector and review its access and retention policies. Telemetry setup/export failures are fail-open: agent work continues and telemetry may be lost. The extension does not write operational details or task content to a plain-text log. See the [full telemetry guide](docs/telemetry.md) for HTTP/protobuf and gRPC setup, configuration, and troubleshooting.
 
-## Safety and scope
-
-“Read-only” is only an agent prompt instruction. The durable `bash` tool can modify files; it is not a security boundary. V1 does not copy Pi tool implementations into child agents, expose recursive subagent management inside children, or monitor transcript deletion.
-
 ## Development
 
 Run the offline checks with:
