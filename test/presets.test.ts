@@ -1,9 +1,9 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { describePresetsForAgent, formatPresets } from "../src/format.ts";
-import { getPresetOrFallback, loadPresetCatalog, parseAgentPreset } from "../src/presets.ts";
+import { getPresetOrFallback, installPackagedPresets, loadPackagedPresets, loadPresetCatalog, parseAgentPreset } from "../src/presets.ts";
 
 const tempDirectories: string[] = [];
 
@@ -41,6 +41,11 @@ describe("agent presets", () => {
 		expect(preset.tools).toEqual([]);
 	});
 
+	it("accepts the codemode opt-in and rejects non-boolean values", () => {
+		expect(parseAgentPreset(validDefinition("scout", "codemode: true\n")).codemode).toBe(true);
+		expect(() => parseAgentPreset(validDefinition("scout", "codemode: yes\n"))).toThrow(/codemode.*boolean/i);
+	});
+
 	it("accepts Pi-native thinking as an alias for effort", () => {
 		const preset = parseAgentPreset(validDefinition("writer").replace("effort: inherit", "thinking: low"));
 		expect(preset.thinking).toBe("low");
@@ -63,6 +68,110 @@ describe("agent presets", () => {
 
 		expect(formatPresets(catalog)).toContain("researcher — Research a topic and return a concise report. (tools: read, bash)");
 		expect(describePresetsForAgent(catalog)).toContain("researcher — Research a topic and return a concise report.; read, bash");
+	});
+
+	it("ships lowercase Scout and Review definitions with inherited models, exact tools, effort, and Code Mode", async () => {
+		const packaged = await loadPackagedPresets();
+		expect(packaged.map(({ preset }) => preset.id)).toEqual(["review", "scout"]);
+		expect(packaged.map(({ preset }) => preset)).toMatchObject([
+			{ id: "review", thinking: "high", tools: ["read", "bash"], codemode: true },
+			{ id: "scout", thinking: "low", tools: ["read", "bash"], codemode: true },
+		]);
+		for (const { preset } of packaged) expect(preset.model).toBeUndefined();
+	});
+
+	it("installs only missing packaged IDs, preserves user definitions, and is idempotent", async () => {
+		const agentDir = await temporaryDirectory();
+		const existing = join(agentDir, "agents", "nested", "scout.md");
+		await mkdir(join(agentDir, "agents", "nested"), { recursive: true });
+		await writeFile(existing, validDefinition("scout", "tools: [read]\n"), "utf8");
+		const packaged = await loadPackagedPresets();
+
+		const first = await installPackagedPresets(agentDir, packaged);
+		expect(first).toEqual({ installed: ["review"], skipped: ["scout"] });
+		expect(await readFile(existing, "utf8")).toContain("tools: [read]");
+		expect((await loadPresetCatalog(agentDir)).valid.has("review")).toBe(true);
+
+		const second = await installPackagedPresets(agentDir, packaged);
+		expect(second).toEqual({ installed: [], skipped: ["review", "scout"] });
+		expect(await readFile(existing, "utf8")).toContain("tools: [read]");
+	});
+
+	it("serializes concurrent installers through atomic publication without duplicate preset IDs", async () => {
+		const agentDir = await temporaryDirectory();
+		const packaged = await loadPackagedPresets();
+		const [first, second] = await Promise.all([
+			installPackagedPresets(agentDir, packaged),
+			installPackagedPresets(agentDir, packaged),
+		]);
+		expect([...first.installed, ...second.installed].sort()).toEqual(["review", "scout"]);
+		expect([...first.skipped, ...second.skipped].sort()).toEqual(["review", "scout"]);
+
+		const ids: string[] = [];
+		const visit = async (directory: string): Promise<void> => {
+			for (const child of await readdir(directory, { withFileTypes: true })) {
+				const path = join(directory, child.name);
+				if (child.isDirectory()) await visit(path);
+				else if (child.isFile() && child.name.endsWith(".md")) {
+					ids.push(parseAgentPreset(await readFile(path, "utf8")).id);
+				}
+			}
+		};
+		await visit(join(agentDir, "agents"));
+		expect(ids.sort()).toEqual(["review", "scout"]);
+		const catalog = await loadPresetCatalog(agentDir);
+		expect([...catalog.valid.keys()].sort()).toEqual(["review", "scout"]);
+		expect(catalog.entries.get("review")?.error).toBeUndefined();
+		expect(catalog.entries.get("scout")?.error).toBeUndefined();
+	});
+
+	it("installs when an unrelated file occupies the default target and chooses a safe alternate filename", async () => {
+		const agentDir = await temporaryDirectory();
+		const agentsDir = join(agentDir, "agents");
+		const defaultTarget = join(agentsDir, "scout.md");
+		const packageDir = join(agentsDir, "durable-subagents-pi-extension");
+		const packageTarget = join(packageDir, "scout.md");
+		await mkdir(packageDir, { recursive: true });
+		await writeFile(defaultTarget, "# User notes, not an agent preset\n", "utf8");
+		await writeFile(packageTarget, "# Package-folder notes, not an agent preset\n", "utf8");
+
+		const result = await installPackagedPresets(agentDir, await loadPackagedPresets());
+		expect(result).toEqual({ installed: ["review", "scout"], skipped: [] });
+		expect(await readFile(defaultTarget, "utf8")).toContain("User notes");
+		expect(await readFile(packageTarget, "utf8")).toContain("Package-folder notes");
+		const catalog = await loadPresetCatalog(agentDir);
+		expect(catalog.valid.has("scout")).toBe(true);
+		expect(catalog.entries.get("scout")?.file).toBe("durable-subagents-pi-extension/scout-1.md");
+		expect(await installPackagedPresets(agentDir, await loadPackagedPresets())).toEqual({
+			installed: [], skipped: ["review", "scout"],
+		});
+	});
+
+	it("keeps copied preset files after the packaged source is removed", async () => {
+		const agentDir = await temporaryDirectory();
+		const packageDir = await temporaryDirectory();
+		const packaged = await loadPackagedPresets();
+		await Promise.all(packaged.map(({ preset, source }) => writeFile(join(packageDir, `${preset.id}.md`), source, "utf8")));
+		const installed = await installPackagedPresets(agentDir, await loadPackagedPresets(packageDir));
+		expect(installed.installed).toEqual(["review", "scout"]);
+		await rm(packageDir, { recursive: true, force: true });
+
+		const userPresets = await loadPresetCatalog(agentDir);
+		expect(userPresets.valid.has("review")).toBe(true);
+		expect(userPresets.valid.has("scout")).toBe(true);
+	});
+
+	it("shows missing packaged defaults and install guidance only when applicable", async () => {
+		const agentDir = await temporaryDirectory();
+		const packaged = await loadPackagedPresets();
+		const emptyCatalog = await loadPresetCatalog(agentDir);
+		expect(formatPresets(emptyCatalog, packaged)).toContain("Packaged defaults missing: review, scout. Run /agents install");
+
+		await installPackagedPresets(agentDir, packaged.slice(0, 1));
+		const partialCatalog = await loadPresetCatalog(agentDir);
+		const listing = formatPresets(partialCatalog, packaged);
+		expect(listing).toContain("Packaged defaults missing: scout");
+		expect(listing).not.toContain("review, scout. Run /agents install");
 	});
 
 	it("recursively discovers named Markdown definitions and ignores supporting Markdown", async () => {

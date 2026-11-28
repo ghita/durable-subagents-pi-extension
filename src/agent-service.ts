@@ -18,6 +18,8 @@ import {
 	type Tx,
 	UsageDoc,
 	type UsageState,
+	type Extension,
+	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { getPresetOrFallback, type AgentPreset, type PresetCatalog } from "./presets.ts";
@@ -109,6 +111,7 @@ export interface AgentServiceOptions {
 	parentModel: ModelRef;
 	parentThinking: ModelThinkingLevel;
 	telemetry?: TelemetryContext;
+	codemodeExtension?: Extension;
 }
 
 function emptyUsage(): UsageTotals {
@@ -228,6 +231,7 @@ export class AgentService {
 	#parentModel: ModelRef;
 	#parentThinking: ModelThinkingLevel;
 	#telemetry?: TelemetryContext;
+	#codemodeExtension?: Extension;
 	#footerHistory = new Map<ConversationId, AgentHistoryCounts>();
 
 	constructor(options: AgentServiceOptions) {
@@ -239,6 +243,7 @@ export class AgentService {
 		this.#parentModel = options.parentModel;
 		this.#parentThinking = options.parentThinking;
 		this.#telemetry = options.telemetry;
+		this.#codemodeExtension = options.codemodeExtension;
 	}
 
 	async #state(): Promise<SubagentsState> {
@@ -255,7 +260,17 @@ export class AgentService {
 		const model = preset?.model ?? this.#parentModel;
 		const thinkingLevel = preset?.thinking ?? this.#parentThinking;
 		validateModelReference(this.#modelRegistry, model, preset?.model === undefined ? "Inherited" : `Preset "${preset.id}"`);
-		const selectedTools = toolRegistrations(preset?.tools);
+		let selectedTools: ToolRegistration[] | undefined = toolRegistrations(preset?.tools);
+		let extensions: Extension[] = [CodingTools];
+		if (preset?.codemode === true) {
+			const codemodeTool = this.#codemodeExtension?.tools?.find((tool) => tool.name === "codemode");
+			if (codemodeTool === undefined || this.#codemodeExtension === undefined) {
+				throw new Error(`Preset "${preset.id}" enables Code Mode, but its runtime is unavailable.`);
+			}
+			selectedTools ??= [...(CodingTools.tools ?? [])];
+			selectedTools = [...selectedTools, codemodeTool as ToolRegistration];
+			extensions = [CodingTools, this.#codemodeExtension];
+		}
 		const operationId = randomUUID();
 
 		return inTelemetrySpan(
@@ -279,7 +294,7 @@ export class AgentService {
 					});
 					const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchorTaskId } });
 					await configure(tx, child.id, {
-						extensions: [CodingTools],
+						extensions,
 						model,
 						thinkingLevel,
 						instructions: `${preset?.instructions ?? ""}${preset === undefined ? "" : "\n\n"}You are the managed agent named "${name}". Follow the task from the main Pi agent and return a useful report.`,

@@ -1,5 +1,5 @@
 export type AgentsCommand =
-	| { action: "help" | "presets" | "list" | "stats" }
+	| { action: "help" | "presets" | "list" | "stats" | "install" }
 	| { action: "footer"; alwaysOn: boolean }
 	| { action: "panes"; limit?: number }
 	| { action: "status"; name: string }
@@ -109,7 +109,7 @@ export function parseAgentsCommand(source: string): AgentsCommand {
 	if (firstToken === "spawn") return parseSpawnCommand(input);
 	const parsed = words(input);
 	const [action, ...tail] = parsed.map((word) => word.value);
-	if (action === "help" || action === "presets" || action === "list" || action === "stats") {
+	if (action === "help" || action === "presets" || action === "list" || action === "stats" || action === "install") {
 		if (tail.length !== 0) throw new Error(`Unexpected arguments after "${action}".`);
 		return { action };
 	}

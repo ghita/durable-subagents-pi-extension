@@ -84,6 +84,7 @@ The `subagent` tool supports `spawn`, `send`, `list`, `status`, `stop`, `stop-al
 ```text
 /agents help
 /agents presets
+/agents install
 /agents list
 /agents status <name>
 /agents spawn <name> [--preset <preset-id>] -- <task>
@@ -134,7 +135,11 @@ Search the project and return a concise summary with file references.
 
 `tools` is optional and Pi-specific. Supported durable-native tools are `read`, `write`, `edit`, and `bash`; an explicit list (including an empty list) is an exact allowlist. If omitted, all four tools are available. Claude Code tool names and Claude-only settings are not supported. Unknown frontmatter fields, malformed definitions, duplicate IDs, invalid settings, and empty instruction bodies are reported as preset errors and never silently broaden tool access or substitute another model. The `/agents presets` listing includes each description and its available tools; the main agent receives the descriptions to help it select a useful preset.
 
-Preset files are read and cached when the extension loads. Changes apply to new agents after Pi `/reload`; they do not rewrite existing agents. See [the agent preset file guide](docs/agents/agent-files.md) for the complete schema and portability caveats.
+Preset files are read and cached when the extension loads. Changes apply to new agents after Pi `/reload`; they do not rewrite existing agents.
+
+The extension ships `scout` and `review` presets. `/agents presets` shows when either packaged default is missing and recommends `/agents install`. Installation copies all missing packaged presets into the user-global agent library, skips existing IDs without overwriting them, and is safe to repeat. The copied files remain after package removal, and upgrades do not replace them. Run `/reload` after installation before using new presets. Both defaults inherit the current model, use only `read` and `bash`, and enable Code Mode with `models.*` helpers disabled; Scout uses low thinking and Review uses high thinking. Their instructions are packaged as Markdown under `presets/`.
+
+See [the agent preset file guide](docs/agents/agent-files.md) for the complete schema, installation behavior, and portability caveats.
 
 ### Running-agent footer
 

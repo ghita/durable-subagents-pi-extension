@@ -60,11 +60,21 @@ tools: [read, bash]
 
 The supported names are `read`, `write`, `edit`, and `bash`. Listing tools is an exact allowlist. If `tools` is omitted, the agent receives all four tools. An empty list is a valid allowlist that gives the agent no tools. Claude Code tool names are not accepted or translated.
 
+### Optional `codemode`
+
+`codemode` is an optional boolean. When `true`, the managed agent receives Pi Durable's Code Mode tool, which can compose calls only to the tools enabled for that preset. It does not expand the preset's `tools` allowlist. Code Mode's `models.*` helpers are disabled for managed agents. Omit the field or set it to `false` to disable Code Mode.
+
 ### Unsupported fields and validation
 
-Only `name`, `description`, `tools`, `model`, and one of `effort` or `thinking` are supported. Unknown frontmatter fields are errors; Claude-specific options such as `disallowedTools`, `permissionMode`, `hooks`, or `mcpServers` are not silently ignored. Malformed frontmatter, missing required fields, invalid values, duplicate IDs, and an empty instruction body must produce clear preset errors and must not silently broaden tool access or substitute another model.
+Only `name`, `description`, `tools`, `model`, `codemode`, and one of `effort` or `thinking` are supported. Unknown frontmatter fields are errors; Claude-specific options such as `disallowedTools`, `permissionMode`, `hooks`, or `mcpServers` are not silently ignored. Malformed frontmatter, missing required fields, invalid values, duplicate IDs, and an empty instruction body must produce clear preset errors and must not silently broaden tool access or substitute another model.
 
 The field names follow Claude Code's custom-subagent convention, but this is not full value/runtime compatibility. In particular, tool names are Pi-specific; `provider/model-id` is Pi-specific; and Pi's `effort: inherit`, `off`, and `minimal` values are outside Claude Code's documented effort values.
+
+## Packaged defaults and installation
+
+The extension ships lowercase `scout` and `review` presets. Both inherit the current model, use only `read` and `bash`, and enable Code Mode with model helpers disabled. Scout uses low thinking; Review uses high thinking. Their instructions are included in the packaged `presets/` Markdown files.
+
+Use `/agents presets` to see installed presets and which packaged defaults are missing. `/agents install` copies every missing packaged preset into `<Pi agent dir>/agents/durable-subagents-pi-extension/` (or a numbered sibling if that directory path is occupied); it checks preset identity by frontmatter `name`, is idempotent, and never overwrites an existing preset ID or file. If a target filename is occupied by unrelated content, installation uses another unused filename. Installed files belong to the user-global preset library and remain there if the extension package is removed. After new files are installed, run `/reload` before using the presets. Package upgrades do not replace user copies; edit or remove those files yourself if you want to change them.
 
 ## References from an agent prompt
 

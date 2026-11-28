@@ -8,6 +8,12 @@ This context defines the named background agents that a Pi main agent can manage
 A named reusable definition used to create a managed agent, including its instructions and optional model, thinking, and tool settings.
 _Avoid_: Agent template
 
+**Packaged agent preset**:
+An agent preset distributed by an installable package, distinct by origin from a user-authored preset even when both are available in the user's global preset library.
+
+**Additive preset installation**:
+Making packaged presets available by adding only preset IDs that are not already present; existing definitions are preserved across package upgrades and package removal.
+
 **Preset ID**:
 The stable identifier used to find a user-global agent preset; it can differ from the managed agent's chosen instance name.
 _Avoid_: Agent name (when referring to a preset)

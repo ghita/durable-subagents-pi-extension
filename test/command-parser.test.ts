@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { parseAgentsCommand } from "../src/command-parser.ts";
 
-describe("/agents panes parsing", () => {
+describe("/agents command parsing", () => {
+	it("accepts install without arguments", () => {
+		expect(parseAgentsCommand("install")).toEqual({ action: "install" });
+		expect(() => parseAgentsCommand("install now")).toThrow(/Unexpected arguments/);
+	});
+
 	it("reports or sets a nonnegative safe integer budget", () => {
 		expect(parseAgentsCommand("panes")).toEqual({ action: "panes" });
 		for (const limit of [0, 3, 100, Number.MAX_SAFE_INTEGER]) {

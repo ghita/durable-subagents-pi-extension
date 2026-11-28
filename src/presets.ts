@@ -1,4 +1,6 @@
-import { readFile, readdir } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, readdir, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { join, relative, sep } from "node:path";
 import { isMap, isScalar, parseDocument } from "yaml";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -13,6 +15,17 @@ export interface AgentPreset {
 	tools?: readonly DurableToolName[];
 	model?: { provider: string; modelId: string };
 	thinking?: ModelThinkingLevel;
+	codemode?: boolean;
+}
+
+export interface PackagedAgentPreset {
+	preset: AgentPreset;
+	source: string;
+}
+
+export interface PresetInstallResult {
+	installed: string[];
+	skipped: string[];
 }
 
 export interface PresetCatalog {
@@ -23,7 +36,7 @@ export interface PresetCatalog {
 
 const PRESET_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const THINKING_LEVELS = new Set<ModelThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const SETTINGS_KEYS = new Set(["name", "description", "tools", "model", "effort", "thinking"]);
+const SETTINGS_KEYS = new Set(["name", "description", "tools", "model", "effort", "thinking", "codemode"]);
 
 export function isValidPresetId(id: string): boolean {
 	return PRESET_ID.test(id);
@@ -99,6 +112,9 @@ export function parseAgentPreset(markdown: string): AgentPreset {
 
 	let tools: readonly DurableToolName[] | undefined;
 	if (Object.hasOwn(settings, "tools")) tools = parseTools(settings.tools);
+	if (Object.hasOwn(settings, "codemode") && typeof settings.codemode !== "boolean") {
+		throw new Error('"codemode" must be a boolean');
+	}
 
 	let model: AgentPreset["model"];
 	if (settings.model !== undefined && settings.model !== "inherit") model = parseModelReference(settings.model);
@@ -118,6 +134,7 @@ export function parseAgentPreset(markdown: string): AgentPreset {
 		...(tools === undefined ? {} : { tools }),
 		...(model === undefined ? {} : { model }),
 		...(thinking === undefined ? {} : { thinking }),
+		...(settings.codemode === undefined ? {} : { codemode: settings.codemode as boolean }),
 	};
 }
 
@@ -235,4 +252,108 @@ export function getPresetOrFallback(catalog: PresetCatalog, id: string | undefin
 	const entry = catalog.entries.get(id);
 	if (entry?.error !== undefined) throw new Error(`Preset "${id}" is invalid: ${entry.error}`);
 	return entry?.preset;
+}
+
+/** Packaged defaults live outside src so Pi installs include editable Markdown definitions verbatim. */
+export const PACKAGED_PRESETS_DIRECTORY = fileURLToPath(new URL("../presets/", import.meta.url));
+
+export async function loadPackagedPresets(directory = PACKAGED_PRESETS_DIRECTORY): Promise<PackagedAgentPreset[]> {
+	const files = await markdownFiles(directory);
+	const packaged: PackagedAgentPreset[] = [];
+	for (const path of files) {
+		const source = await readFile(path, "utf8");
+		const preset = parseAgentPreset(source);
+		packaged.push({ preset, source });
+	}
+	const ids = new Set<string>();
+	for (const { preset } of packaged) {
+		if (ids.has(preset.id)) throw new Error(`Packaged presets contain duplicate ID "${preset.id}".`);
+		ids.add(preset.id);
+	}
+	return packaged.sort((a, b) => a.preset.id.localeCompare(b.preset.id));
+}
+
+/** Copy missing packaged IDs into <Pi agent dir>/agents without ever replacing user files. */
+const PACKAGED_PRESET_DIRECTORY_NAME = "durable-subagents-pi-extension";
+
+async function packagedPresetDirectory(agentsDirectory: string): Promise<string> {
+	for (let suffix = 0; ; suffix += 1) {
+		const name = suffix === 0 ? PACKAGED_PRESET_DIRECTORY_NAME : `${PACKAGED_PRESET_DIRECTORY_NAME}-${suffix}`;
+		const directory = join(agentsDirectory, name);
+		try {
+			await mkdir(directory);
+			return directory;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			try {
+				const existing = await lstat(directory);
+				if (existing.isDirectory() && !existing.isSymbolicLink()) return directory;
+			} catch (statError) {
+				if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+			}
+		}
+	}
+}
+
+async function publishPackagedPreset(
+	agentDir: string,
+	installDirectory: string,
+	preset: AgentPreset,
+	source: string,
+): Promise<"installed" | "already-installed"> {
+	const temporaryFile = join(installDirectory, `.${preset.id}-${randomUUID()}.tmp`);
+	let staged = false;
+	try {
+		// Write and close the complete source before atomically publishing its final .md link.
+		const handle = await open(temporaryFile, "wx");
+		staged = true;
+		try { await handle.writeFile(source, { encoding: "utf8" }); }
+		finally { await handle.close(); }
+		for (let suffix = 0; ; suffix += 1) {
+			const filename = suffix === 0 ? `${preset.id}.md` : `${preset.id}-${suffix}.md`;
+			try {
+				await link(temporaryFile, join(installDirectory, filename));
+				return "installed";
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+					throw new Error(`Unable to install packaged preset "${preset.id}": ${error instanceof Error ? error.message : String(error)}`);
+				}
+				// link() exposes only a fully written file, so a concurrent installer can safely
+				// rescan frontmatter here rather than mistaking its publication for a filename clash.
+				if ((await loadPresetCatalog(agentDir)).entries.has(preset.id)) return "already-installed";
+			}
+		}
+	} finally {
+		if (staged) {
+			try { await unlink(temporaryFile); }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		}
+	}
+}
+
+export async function installPackagedPresets(
+	agentDir: string,
+	packagedPresets: readonly PackagedAgentPreset[],
+): Promise<PresetInstallResult> {
+	const agentsDirectory = join(agentDir, "agents");
+	await mkdir(agentsDirectory, { recursive: true });
+	const catalog = await loadPresetCatalog(agentDir);
+	const knownIds = new Set(catalog.entries.keys());
+	const installDirectory = await packagedPresetDirectory(agentsDirectory);
+	const installed: string[] = [];
+	const skipped: string[] = [];
+
+	for (const { preset, source } of packagedPresets) {
+		if (knownIds.has(preset.id)) {
+			skipped.push(preset.id);
+			continue;
+		}
+		const published = await publishPackagedPreset(agentDir, installDirectory, preset, source);
+		if (published === "installed") installed.push(preset.id);
+		else skipped.push(preset.id);
+		knownIds.add(preset.id);
+	}
+	return { installed, skipped };
 }

@@ -15,10 +15,13 @@ import {
 	Harness,
 	type ModelRef,
 	UsageDoc,
+	type Extension,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
+import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { InMemoryTelemetryContext, type TelemetryContext } from "@earendil-works/pi-telemetry";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentService } from "../src/agent-service.ts";
@@ -28,9 +31,11 @@ import { SubagentTasksExtension } from "../src/tasks.ts";
 
 const directories: string[] = [];
 const openHarnesses: Harness[] = [];
+const codemodeSandboxes: CodemodeSandbox[] = [];
 
 afterEach(async () => {
 	await Promise.all(openHarnesses.splice(0).map((harness) => harness.close(BACKGROUND_CONTEXT)));
+	await Promise.all(codemodeSandboxes.splice(0).map((sandbox) => sandbox.close()));
 	await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -39,6 +44,7 @@ async function setup(
 	tokensPerSecond = 100_000,
 	presets: PresetCatalog = { entries: new Map(), valid: new Map() },
 	telemetry?: TelemetryContext,
+	codemodeExtension?: Extension,
 ) {
 	const directory = await mkdtemp(join(tmpdir(), "durable-subagents-integration-"));
 	directories.push(directory);
@@ -52,6 +58,7 @@ async function setup(
 	models.setProvider(faux.provider);
 	const durableRegistry = createRegistry();
 	durableRegistry.install(CodingTools);
+	if (codemodeExtension !== undefined) durableRegistry.install(codemodeExtension);
 	durableRegistry.install(SubagentTasksExtension);
 	const cwd = process.cwd();
 	const harness = await Harness.open(await openNodeSqliteStorage(join(directory, "session.sqlite")), {
@@ -85,6 +92,7 @@ async function setup(
 		parentModel,
 		parentThinking: "off",
 		telemetry,
+		codemodeExtension,
 	});
 	harness.resume();
 	return { service, harness, root, modelRegistry, model, directory, faux, models, durableRegistry, cwd, parentModel, presets };
@@ -602,6 +610,34 @@ describe("AgentService durable lifecycle", () => {
 
 		await expect(service.spawn("no-login", undefined, "Try this preset.")).rejects.toThrow(/unavailable with Pi's configured provider authentication/);
 		await expect(service.list()).resolves.toEqual([]);
+	});
+
+	it("enables Code Mode while restricting its callable tools to a preset allowlist", async () => {
+		const sandbox = new CodemodeSandbox();
+		codemodeSandboxes.push(sandbox);
+		const codemodeExtension = createCodemodeExtension({ sandbox, models: false });
+		const preset: AgentPreset = {
+			id: "scout",
+			description: "Explore read-only.",
+			instructions: "Do not edit files.",
+			tools: ["read", "bash"],
+			thinking: "low",
+			codemode: true,
+		};
+		const presets: PresetCatalog = {
+			entries: new Map([[preset.id, { preset }]]),
+			valid: new Map([[preset.id, preset]]),
+		};
+		const { service, harness } = await setup([], 100_000, presets, undefined, codemodeExtension);
+		const spawned = await service.spawn("scout", undefined, "Inspect the project.");
+		const child = await harness.conversation(spawned.conversationId, BACKGROUND_CONTEXT);
+		const agent = await child?.agent(BACKGROUND_CONTEXT);
+
+		expect(codemodeExtension.tools?.map((tool) => tool.name)).toEqual(["codemode"]);
+		expect(agent?.extensions.map((extension) => extension.name)).toEqual(["coding-tools", "codemode"]);
+		expect(agent?.tools.map((tool) => tool.name)).toEqual(["read", "bash", "codemode"]);
+		expect(agent?.callable.map((tool) => tool.name)).toEqual(["read", "bash"]);
+		expect(agent?.thinkingLevel).toBe("low");
 	});
 
 	it("stats total only managed child usage and sort agents by descending cost", async () => {

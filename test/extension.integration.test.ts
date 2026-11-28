@@ -32,11 +32,14 @@ vi.mock("../src/herdr-monitor.ts", () => ({
 const directories: string[] = [];
 let priorHerdrEnv: string | undefined;
 let priorHerdrWorkspaceId: string | undefined;
+let priorAgentDirectory: string | undefined;
 beforeEach(() => {
 	priorHerdrEnv = process.env.HERDR_ENV;
 	priorHerdrWorkspaceId = process.env.HERDR_WORKSPACE_ID;
+	priorAgentDirectory = process.env.PI_CODING_AGENT_DIR;
 	delete process.env.HERDR_ENV;
 	delete process.env.HERDR_WORKSPACE_ID;
+	delete process.env.PI_CODING_AGENT_DIR;
 });
 afterEach(async () => {
 	await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
@@ -44,6 +47,8 @@ afterEach(async () => {
 	else process.env.HERDR_ENV = priorHerdrEnv;
 	if (priorHerdrWorkspaceId === undefined) delete process.env.HERDR_WORKSPACE_ID;
 	else process.env.HERDR_WORKSPACE_ID = priorHerdrWorkspaceId;
+	if (priorAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = priorAgentDirectory;
 });
 
 describe("Pi extension integration", () => {
@@ -52,6 +57,7 @@ describe("Pi extension integration", () => {
 		directories.push(directory);
 		const sessionFile = join(directory, "transcript.jsonl");
 		await writeFile(sessionFile, "", "utf8");
+		process.env.PI_CODING_AGENT_DIR = join(directory, "user-agent");
 
 		const faux = fauxProvider({
 			tokensPerSecond: 100_000,
@@ -138,6 +144,13 @@ describe("Pi extension integration", () => {
 		await handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, context);
 		expect(commands.has("agents")).toBe(true);
 		expect(tools.has("durable_subagent")).toBe(true);
+		await commands.get("agents")!.handler("presets", commandContext);
+		expect(notifications.at(-1)).toContain("Packaged defaults missing: review, scout. Run /agents install");
+		await commands.get("agents")!.handler("install", commandContext);
+		expect(notifications.at(-1)).toContain("Installed packaged presets: review, scout. Run /reload before using the newly installed presets.");
+		await commands.get("agents")!.handler("install", commandContext);
+		expect(notifications.at(-1)).toContain("No new packaged presets installed.");
+		expect(notifications.at(-1)).toContain("Skipped existing preset IDs without overwriting them: review, scout.");
 		expect(display.options.paneLimit).toBe(3);
 		expect(display.attach).toHaveBeenCalledOnce();
 		// Display errors are visible but rate-limited independently of durable work.

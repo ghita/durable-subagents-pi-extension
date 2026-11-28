@@ -1,5 +1,5 @@
 import type { AgentSummary, StatsRow, UsageTotals } from "./agent-service.ts";
-import type { PresetCatalog } from "./presets.ts";
+import type { PackagedAgentPreset, PresetCatalog } from "./presets.ts";
 
 function money(value: number): string {
 	return `$${value.toFixed(6)}`;
@@ -32,23 +32,27 @@ export function describePresetsForAgent(catalog: PresetCatalog): string {
 		: `Cached presets (ID — purpose; available tools): ${presets.map((preset) => `${preset.id} — ${preset.description}; ${preset.tools?.join(", ") ?? "all durable tools"}`).join(" | ")}.`;
 }
 
-export function formatPresets(catalog: PresetCatalog): string {
-	if (catalog.entries.size === 0) return "No presets found. Add user-global agent definitions under <Pi agent dir>/agents/**/*.md.";
-	return [...catalog.entries.entries()]
+export function formatPresets(catalog: PresetCatalog, packagedPresets: readonly PackagedAgentPreset[] = []): string {
+	const installed = [...catalog.entries.entries()]
 		.sort(([a], [b]) => a.localeCompare(b))
 		.map(([id, entry]) => {
 			if (entry.error !== undefined) return `${id} — INVALID: ${entry.error}${entry.file === undefined ? "" : ` (${entry.file})`}`;
 			const preset = entry.preset!;
 			const tools = preset.tools === undefined ? "all durable tools" : `tools: ${preset.tools.join(", ")}`;
 			return `${id} — ${preset.description} (${tools})`;
-		})
-		.join("\n");
+		});
+	const missing = packagedPresets.filter(({ preset }) => !catalog.entries.has(preset.id));
+	if (installed.length === 0) installed.push("No presets found. Add user-global agent definitions under <Pi agent dir>/agents/**/*.md.");
+	if (missing.length > 0) {
+		installed.push(`Packaged defaults missing: ${missing.map(({ preset }) => preset.id).join(", ")}. Run /agents install to add them.`);
+	}
+	return installed.join("\n");
 }
 
 export function formatHelp(presets: PresetCatalog): string {
 	const ids = [...presets.valid.keys()].sort((a, b) => a.localeCompare(b));
 	return [
-		"/agents help | presets | list | status <name> | spawn <name> [--preset <id>] -- <task>",
+		"/agents help | presets | install | list | status <name> | spawn <name> [--preset <id>] -- <task>",
 		"/agents send <name> <message> | stop <name> | stop --all | stats",
 		"/agents footer alwaysOn|activity",
 		`Cached presets: ${ids.length === 0 ? "(none)" : ids.join(", ")}`,

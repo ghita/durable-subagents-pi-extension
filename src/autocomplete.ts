@@ -1,4 +1,4 @@
-const ACTIONS = ["help", "presets", "list", "status", "spawn", "send", "stop", "stats", "footer"] as const;
+const ACTIONS = ["help", "presets", "install", "list", "status", "spawn", "send", "stop", "stats", "footer"] as const;
 
 function items(values: readonly string[], partial: string, before: string) {
 	const needle = partial.replace(/^['"]/, "").replace(/['"]$/, "").toLocaleLowerCase();

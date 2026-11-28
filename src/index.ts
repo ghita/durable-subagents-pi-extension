@@ -13,7 +13,7 @@ import { getAgentCompletions } from "./autocomplete.ts";
 import { parseAgentsCommand } from "./command-parser.ts";
 import { describePresetsForAgent, formatAgentList, formatAgentSummary, formatHelp, formatPresets, formatStats } from "./format.ts";
 import { modelReference } from "./model-bridge.ts";
-import { loadPresetCatalog } from "./presets.ts";
+import { installPackagedPresets, loadPackagedPresets, loadPresetCatalog } from "./presets.ts";
 import { openManagedSessionRuntime, type ManagedSessionRuntime, requireSessionFile } from "./runtime.ts";
 const SubagentParameters = Type.Object({
 	action: Type.Union([
@@ -167,7 +167,9 @@ async function runToolAction(
 
 export default async function durableSubagents(pi: ExtensionAPI): Promise<void> {
 	// Loading at extension initialization makes the preset view stable until Pi reloads this extension.
-	const presetCatalog = await loadPresetCatalog(getAgentDir());
+	const agentDir = getAgentDir();
+	const presetCatalog = await loadPresetCatalog(agentDir);
+	const packagedPresets = await loadPackagedPresets();
 	const presetIds = [...presetCatalog.valid.keys()].sort((a, b) => a.localeCompare(b));
 	const presetGuidance = describePresetsForAgent(presetCatalog);
 
@@ -201,7 +203,17 @@ export default async function durableSubagents(pi: ExtensionAPI): Promise<void> 
 				const command = parseAgentsCommand(args);
 				if (command.action === "help") return `${formatHelp(presetCatalog)}
 /agents panes [K] - show or set the current tab's agent-display budget (default 3; 0 disables displays).`;
-				if (command.action === "presets") return formatPresets(presetCatalog);
+				if (command.action === "presets") return formatPresets(presetCatalog, packagedPresets);
+				if (command.action === "install") {
+					const result = await installPackagedPresets(agentDir, packagedPresets);
+					const installed = result.installed.length === 0
+						? "No new packaged presets installed."
+						: `Installed packaged presets: ${result.installed.join(", ")}. Run /reload before using the newly installed presets.`;
+					const skipped = result.skipped.length === 0
+						? ""
+						: ` Skipped existing preset IDs without overwriting them: ${result.skipped.join(", ")}.`;
+					return `${installed}${skipped}`;
+				}
 				if (command.action === "panes") {
 					if (command.limit !== undefined) {
 						// Set before opening a runtime: K=0 must never transiently restore panes.

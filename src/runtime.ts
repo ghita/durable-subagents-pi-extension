@@ -11,6 +11,8 @@ import {
 	type ModelRef,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
+import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { AgentService } from "./agent-service.ts";
@@ -72,8 +74,11 @@ async function initializeManagedSessionRuntime(
 	const cwd = context.cwd;
 	const presets = await loadPresetCatalog(getAgentDir());
 	const storage = await openNodeSqliteStorage(databasePath);
+	const codemodeSandbox = new CodemodeSandbox();
+	const codemodeExtension = createCodemodeExtension({ sandbox: codemodeSandbox, models: false });
 	const registry = createRegistry();
 	registry.install(CodingTools);
+	registry.install(codemodeExtension);
 	registry.install(SubagentTasksExtension);
 
 	const harness = await Harness.open(
@@ -110,6 +115,7 @@ async function initializeManagedSessionRuntime(
 		parentModel,
 		parentThinking,
 		telemetry,
+		codemodeExtension,
 	});
 	await service.updateInherited(parentModel, parentThinking);
 
@@ -225,7 +231,11 @@ async function initializeManagedSessionRuntime(
 			try {
 				await harness.close(BACKGROUND_CONTEXT);
 			} finally {
-				await optInTelemetry?.close();
+				try {
+					await codemodeSandbox.close();
+				} finally {
+					await optInTelemetry?.close();
+				}
 			}
 		},
 	};
