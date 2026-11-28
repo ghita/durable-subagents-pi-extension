@@ -23,7 +23,7 @@ export interface PresetCatalog {
 
 const PRESET_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const THINKING_LEVELS = new Set<ModelThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const SETTINGS_KEYS = new Set(["name", "description", "tools", "model", "effort"]);
+const SETTINGS_KEYS = new Set(["name", "description", "tools", "model", "effort", "thinking"]);
 
 export function isValidPresetId(id: string): boolean {
 	return PRESET_ID.test(id);
@@ -44,7 +44,6 @@ function parseTools(value: unknown): readonly DurableToolName[] {
 	if (!Array.isArray(value) || !value.every((tool) => typeof tool === "string")) {
 		throw new Error('"tools" must be an array of durable-native tool names');
 	}
-	if (value.length === 0) throw new Error('"tools" must not be empty');
 	const seen = new Set<string>();
 	for (const tool of value as string[]) {
 		if (!(DURABLE_TOOL_NAMES as readonly string[]).includes(tool)) {
@@ -89,21 +88,27 @@ export function parseAgentPreset(markdown: string): AgentPreset {
 		throw new Error('"description" is required and must be a non-empty string');
 	}
 	if (body.length === 0) throw new Error("Preset instruction body must not be empty");
-	if (typeof settings.model !== "string") throw new Error('"model" is required and must be "inherit" or provider/model-id');
-	if (typeof settings.effort !== "string") throw new Error('"effort" is required and must be "inherit" or a supported Pi thinking level');
+	if (Object.hasOwn(settings, "model") && typeof settings.model !== "string") {
+		throw new Error('"model" must be "inherit" or provider/model-id');
+	}
+	if (Object.hasOwn(settings, "effort") && Object.hasOwn(settings, "thinking")) {
+		throw new Error('Use either "effort" or the Pi-native "thinking" field, not both');
+	}
+	const rawEffort = settings.effort ?? settings.thinking;
+	if (typeof rawEffort !== "string") throw new Error('"effort" (or the Pi-native "thinking" alias) is required and must be "inherit" or a supported Pi thinking level');
 
 	let tools: readonly DurableToolName[] | undefined;
 	if (Object.hasOwn(settings, "tools")) tools = parseTools(settings.tools);
 
 	let model: AgentPreset["model"];
-	if (settings.model !== "inherit") model = parseModelReference(settings.model);
+	if (settings.model !== undefined && settings.model !== "inherit") model = parseModelReference(settings.model);
 
 	let thinking: ModelThinkingLevel | undefined;
-	if (settings.effort !== "inherit") {
-		if (!THINKING_LEVELS.has(settings.effort as ModelThinkingLevel)) {
-			throw new Error(`Unsupported effort level "${settings.effort}"`);
+	if (rawEffort !== "inherit") {
+		if (!THINKING_LEVELS.has(rawEffort as ModelThinkingLevel)) {
+			throw new Error(`Unsupported effort level "${rawEffort}"`);
 		}
-		thinking = settings.effort as ModelThinkingLevel;
+		thinking = rawEffort as ModelThinkingLevel;
 	}
 
 	return {

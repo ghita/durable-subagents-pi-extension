@@ -47,8 +47,8 @@ Investigate the assigned topic. Cite sources and distinguish evidence from uncer
 | --- | --- |
 | `name` | Required preset ID. It must match Pi's current ID rule: 1–64 ASCII letters, numbers, `_`, or `-`, starting with a letter or number. IDs must be unique across the recursively discovered files. Duplicate IDs invalidate the colliding definitions; the extension must not choose one based on scan order. |
 | `description` | Required short explanation of when this agent is useful. Shown in `/agents presets` and supplied to the parent agent to help it select a preset. |
-| `model` | Required. Use `inherit` to follow the parent agent's model, or a Pi model reference in `provider/model-id` form. An inherited model follows later parent model changes; an explicit model stays fixed. Explicit references must resolve through Pi's model registry and configured provider authentication. |
-| `effort` | Required. Use `inherit` to follow the parent agent's thinking level, or a supported Pi level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Inherited effort follows later parent changes; an explicit value stays fixed. Pi maps this field to its thinking-level setting. |
+| `model` | Optional. Omit it or use `inherit` to follow the parent agent's model; explicit Pi model references use `provider/model-id` form. An inherited model follows later parent model changes; an explicit model stays fixed. Explicit references must resolve through Pi's model registry and configured provider authentication. |
+| `effort` or `thinking` | Required. Use one field, not both. `effort` is the canonical preset field; `thinking` is accepted as a Pi-native alias. Use `inherit` to follow the parent agent's thinking level, or a supported Pi level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Inherited effort follows later parent changes; an explicit value stays fixed. Pi maps either field to its thinking-level setting. |
 
 ### Optional `tools`
 
@@ -58,11 +58,11 @@ Investigate the assigned topic. Cite sources and distinguish evidence from uncer
 tools: [read, bash]
 ```
 
-The supported names are `read`, `write`, `edit`, and `bash`. Listing tools is an exact allowlist. If `tools` is omitted, the agent receives all four tools. An empty list is invalid. Claude Code tool names are not accepted or translated.
+The supported names are `read`, `write`, `edit`, and `bash`. Listing tools is an exact allowlist. If `tools` is omitted, the agent receives all four tools. An empty list is a valid allowlist that gives the agent no tools. Claude Code tool names are not accepted or translated.
 
 ### Unsupported fields and validation
 
-Only `name`, `description`, `tools`, `model`, and `effort` are supported. Unknown frontmatter fields are errors; Claude-specific options such as `disallowedTools`, `permissionMode`, `hooks`, or `mcpServers` are not silently ignored. Malformed frontmatter, missing required fields, invalid values, duplicate IDs, and an empty instruction body must produce clear preset errors and must not silently broaden tool access or substitute another model.
+Only `name`, `description`, `tools`, `model`, and one of `effort` or `thinking` are supported. Unknown frontmatter fields are errors; Claude-specific options such as `disallowedTools`, `permissionMode`, `hooks`, or `mcpServers` are not silently ignored. Malformed frontmatter, missing required fields, invalid values, duplicate IDs, and an empty instruction body must produce clear preset errors and must not silently broaden tool access or substitute another model.
 
 The field names follow Claude Code's custom-subagent convention, but this is not full value/runtime compatibility. In particular, tool names are Pi-specific; `provider/model-id` is Pi-specific; and Pi's `effort: inherit`, `off`, and `minimal` values are outside Claude Code's documented effort values.
 

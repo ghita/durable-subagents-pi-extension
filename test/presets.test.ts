@@ -36,6 +36,21 @@ describe("agent presets", () => {
 		});
 	});
 
+	it("accepts an empty tool allowlist without broadening tool access", () => {
+		const preset = parseAgentPreset(validDefinition("writer", "tools: []\n"));
+		expect(preset.tools).toEqual([]);
+	});
+
+	it("accepts Pi-native thinking as an alias for effort", () => {
+		const preset = parseAgentPreset(validDefinition("writer").replace("effort: inherit", "thinking: low"));
+		expect(preset.thinking).toBe("low");
+	});
+
+	it("inherits the parent model when model is omitted", () => {
+		const preset = parseAgentPreset(validDefinition().replace("model: inherit\\n", ""));
+		expect(preset.model).toBeUndefined();
+	});
+
 	it("represents inherited model and effort settings as live inheritance", () => {
 		const preset = parseAgentPreset(validDefinition());
 		expect(preset.model).toBeUndefined();
@@ -92,10 +107,10 @@ describe("agent presets", () => {
 		["unknown key", validDefinition("writer", "foo: bar\n")],
 		["duplicate key", validDefinition("writer", "tools: [read]\ntools: [bash]\n")],
 		["duplicate tool", validDefinition("writer", "tools: [read, read]\n")],
-		["empty tool allowlist", validDefinition("writer", "tools: []\n")],
 		["invalid model reference", validDefinition("writer").replace("model: inherit", "model: invalid")],
 		["whitespace in model reference", validDefinition("writer").replace("model: inherit", "model: provider/ model")],
 		["invalid effort", validDefinition("writer").replace("effort: inherit", "effort: limitless")],
+		["conflicting effort aliases", validDefinition("writer", "thinking: high\n")],
 		["missing required description", validDefinition("writer").replace("description: Research a topic and return a concise report.\n", "")],
 		["invalid name", validDefinition("bad name")],
 		["empty prompt", validDefinition("writer").replace("Be concise and cite sources.\n", "  \n")],
